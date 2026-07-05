@@ -22,9 +22,13 @@ public final class OneDriveServiceProvider: CloudServiceProvider {
     
     public var credential: URLCredential?
     
+    public let session: URLSession
+    
     private let apiURL = URL(string: "https://graph.microsoft.com/v1.0")!
     
     public var refreshAccessTokenHandler: CloudRefreshAccessTokenHandler?
+    
+    public let uploadChunkSize: Int64 = OneDriveUploadPolicy.chunkSize
     
     public enum Route: Sendable {
         case me
@@ -48,11 +52,19 @@ public final class OneDriveServiceProvider: CloudServiceProvider {
     
     required public init(credential: URLCredential?) {
         self.credential = credential
+        self.session = .shared
         self.route = .me
     }
     
-    public init(credential: URLCredential?, route: Route) {
+    public init(credential: URLCredential?, session: URLSession) {
         self.credential = credential
+        self.session = session
+        self.route = .me
+    }
+    
+    public init(credential: URLCredential?, route: Route, session: URLSession = .shared) {
+        self.credential = credential
+        self.session = session
         self.route = route
     }
     
@@ -189,16 +201,18 @@ public final class OneDriveServiceProvider: CloudServiceProvider {
     
     /// Search files with provided keyword.
     public func searchFiles(keyword: String) async throws -> [CloudItem] {
-        let url = apiURL.appendingPathComponent("\(route.prefix)/drive/root/search(q='\(keyword)')")
+        let escapedKeyword = keyword.replacingOccurrences(of: "'", with: "''").urlEncoded
+        let url = apiURL.appendingPathComponent("\(route.prefix)/drive/root/search(q='\(escapedKeyword)')")
         let response = try await get(url: url)
         if let json = response.response?.json as? [String: Any], let value = json["value"] as? [[String: Any]] {
             return value.compactMap { OneDriveServiceProvider.cloudItemFromJSON($0) }
         } else {
-            throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult(data: nil, response: nil, error: nil, task: nil))
+            throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult())
         }
     }
     
     /// Upload file data to target directory.
+    /// - Warning: Loads the entire payload into memory. For files larger than 4 MB, use `uploadFile` or `CloudResumableUploading` instead.
     public func uploadData(_ data: Data, filename: String, to directory: CloudItem, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
         let escapedName = filename.urlEncoded
         let url = itemURL(for: directory).appendingPathComponent("children/\(escapedName)/content")
@@ -222,14 +236,13 @@ public final class OneDriveServiceProvider: CloudServiceProvider {
         
         // Use upload session for files larger than 4MB
         if totalSize > 4 * 1024 * 1024 {
-            let escapedName = fileURL.lastPathComponent.urlEncoded
-            let url = itemURL(for: directory).appendingPathComponent("children/\(escapedName)/createUploadSession")
-            let response = try await post(url: url)
-            if let json = response.response?.json as? [String: Any], let uploadUrl = json["uploadUrl"] as? String {
-                return try await performUpload(fileURL: fileURL, uploadUrl: uploadUrl, progressHandler: progressHandler)
-            } else {
-                throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult(data: nil, response: nil, error: nil, task: nil))
-            }
+            var cloudSession = try await beginUpload(
+                fileURL: fileURL,
+                filename: fileURL.lastPathComponent,
+                to: directory,
+                contentType: "application/octet-stream"
+            )
+            return try await uploadChunksReturningResponse(session: &cloudSession, progressHandler: progressHandler)
         } else {
             let data = try Data(contentsOf: fileURL)
             return try await uploadData(data, filename: fileURL.lastPathComponent, to: directory, progressHandler: progressHandler)
@@ -237,41 +250,106 @@ public final class OneDriveServiceProvider: CloudServiceProvider {
     }
 }
 
-// MARK: - Upload Session
-extension OneDriveServiceProvider {
+// MARK: - Resumable Upload
+extension OneDriveServiceProvider: CloudResumableUploading {
     
-    private func performUpload(fileURL: URL, uploadUrl: String, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
-        let size = try fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-        let totalLength = Int64(size)
-        let chunkSize: Int64 = 5 * 1024 * 1024 // 5MB chunks
+    public func beginUpload(
+        fileURL: URL,
+        filename: String,
+        to directory: CloudItem,
+        contentType: String?
+    ) async throws -> CloudUploadSession {
+        guard FileManager.default.fileExists(atPath: fileURL.path), let totalSize = fileSize(of: fileURL) else {
+            throw CloudServiceError.uploadFileNotExist
+        }
         
-        func uploadChunk(offset: Int64) async throws -> CloudResponse<HTTPResult, Error> {
-            let length = min(chunkSize, totalLength - offset)
-            let handle = try FileHandle(forReadingFrom: fileURL)
-            try handle.seek(toOffset: UInt64(offset))
-            let data = handle.readData(ofLength: Int(length))
-            try handle.close()
+        let escapedName = filename.urlEncoded
+        let url = itemURL(for: directory).appendingPathComponent("children/\(escapedName)/createUploadSession")
+        let response = try await post(url: url)
+        guard let json = response.response?.json as? [String: Any],
+              let uploadUrl = json["uploadUrl"] as? String else {
+            throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult())
+        }
+        
+        return CloudUploadSession(
+            provider: name,
+            fileURL: fileURL,
+            filename: filename,
+            directoryID: directory.id,
+            totalBytes: totalSize,
+            sessionToken: uploadUrl
+        )
+    }
+    
+    public func uploadChunk(
+        session: inout CloudUploadSession,
+        progressHandler: (@Sendable (Progress) -> Void)? = nil
+    ) async throws -> CloudUploadSession {
+        guard !session.isComplete else { return session }
+        
+        let offset = session.uploadedBytes
+        let length = min(uploadChunkSize, session.totalBytes - offset)
+        let data = try await FileChunkReader.readChunk(from: session.fileURL, offset: offset, length: Int(length))
+        
+        var headers: [String: String] = [:]
+        headers["Content-Length"] = "\(length)"
+        headers["Content-Range"] = "bytes \(offset)-\(offset + length - 1)/\(session.totalBytes)"
+        headers["Content-Type"] = "application/octet-stream"
+        
+        let progressReport = Progress(totalUnitCount: session.totalBytes)
+        let response = try await put(url: session.sessionToken, headers: headers, requestBody: data, progressHandler: { progress in
+            progressReport.completedUnitCount = offset + Int64(Float(length) * progress.percent)
+            progressHandler?(progressReport)
+        })
+        
+        session.uploadedBytes = offset + length
+        
+        if session.isComplete,
+           let json = response.response?.json as? [String: Any],
+           let id = json["id"] as? String {
+            session.remoteFileID = id
+        }
+        
+        return session
+    }
+    
+    public func finishUpload(session: CloudUploadSession) async throws -> CloudItem {
+        if let remoteFileID = session.remoteFileID {
+            return try await attributesOfItem(CloudItem(id: remoteFileID, name: session.filename, path: session.filename))
+        }
+        throw CloudServiceError.responseDecodeError(HTTPResult())
+    }
+    
+    private func uploadChunksReturningResponse(
+        session: inout CloudUploadSession,
+        progressHandler: (@Sendable (Progress) -> Void)? = nil
+    ) async throws -> CloudResponse<HTTPResult, Error> {
+        var lastResponse: CloudResponse<HTTPResult, Error>?
+        while !session.isComplete {
+            let offset = session.uploadedBytes
+            let length = min(uploadChunkSize, session.totalBytes - offset)
+            let data = try await FileChunkReader.readChunk(from: session.fileURL, offset: offset, length: Int(length))
             
             var headers: [String: String] = [:]
             headers["Content-Length"] = "\(length)"
-            headers["Content-Range"] = "bytes \(offset)-\(offset + length - 1)/\(totalLength)"
+            headers["Content-Range"] = "bytes \(offset)-\(offset + length - 1)/\(session.totalBytes)"
             headers["Content-Type"] = "application/octet-stream"
             
-            let progressReport = Progress(totalUnitCount: totalLength)
-            let response = try await put(url: uploadUrl, headers: headers, requestBody: data, progressHandler: { progress in
+            let progressReport = Progress(totalUnitCount: session.totalBytes)
+            let response = try await put(url: session.sessionToken, headers: headers, requestBody: data, progressHandler: { progress in
                 progressReport.completedUnitCount = offset + Int64(Float(length) * progress.percent)
                 progressHandler?(progressReport)
             })
+            lastResponse = response
+            session.uploadedBytes = offset + length
             
-            let nextOffset = offset + length
-            if nextOffset >= totalLength {
-                return response
-            } else {
-                return try await uploadChunk(offset: nextOffset)
+            if session.isComplete,
+               let json = response.response?.json as? [String: Any],
+               let id = json["id"] as? String {
+                session.remoteFileID = id
             }
         }
-        
-        return try await uploadChunk(offset: 0)
+        return lastResponse ?? CloudResponse(response: HTTPResult(), result: .success(HTTPResult()))
     }
 }
 
@@ -285,8 +363,8 @@ extension OneDriveServiceProvider: CloudServiceResponseProcessing {
         let isFolder = json["folder"] != nil
         var item = CloudItem(id: id, name: name, path: name, isDirectory: isFolder, json: json)
         item.size = (json["size"] as? NSNumber)?.int64Value ?? -1
-        if let file = json["file"] as? [String: Any] {
-            item.fileHash = file["hashes"] as? String
+        if let file = json["file"] as? [String: Any], let hashes = file["hashes"] as? [String: Any] {
+            item.fileHash = (hashes["sha1Hash"] as? String) ?? (hashes["quickXorHash"] as? String)
         }
         let dateFormatter = DateFormatter()
         dateFormatter.locale = Locale(identifier: "en_US_POSIX")

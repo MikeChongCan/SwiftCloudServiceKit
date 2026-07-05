@@ -163,4 +163,22 @@ final class WebDAVServiceProviderTests: XCTestCase {
         let data = try await provider.getFileData(item)
         XCTAssertEqual(data, expectedData)
     }
+    
+    func test_WebDAV_endpointWithBasePath_isPreserved() async throws {
+        let customEndpoint = URL(string: "https://cloud.example.com/remote.php/dav/files/alice/")!
+        let customCredential = URLCredential(user: "alice", password: "password", persistence: .none)
+        let customProvider = WebDAVServiceProvider(endpoint: customEndpoint, credential: customCredential, session: session)
+        
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.absoluteString, "https://cloud.example.com/remote.php/dav/files/alice/folder1/file1.txt")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!
+            return (response, nil)
+        }
+        
+        let item = CloudItem(id: "folder1/file1.txt", name: "file1.txt", path: "folder1/file1.txt", isDirectory: false)
+        let response = try await customProvider.removeItem(item)
+        if case .failure(let error) = response.result {
+            XCTFail("Request failed: \(error)")
+        }
+    }
 }

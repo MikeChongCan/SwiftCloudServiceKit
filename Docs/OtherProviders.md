@@ -43,6 +43,23 @@ This document describes how to configure developer consoles and configure OAuth 
 ## 4. 115 and 123 Pan Setup
 
 115 and 123 Pan use standard credentials (API key/secret or developer-issued OAuth accounts) under their developer programs.
+
 Refer to their official API pages to set up authorization:
+
 - 115 Open Platform: [115 API Guide](https://www.yuque.com/115yun/open/gv0l5007pczskivz)
 - 123 Pan: [123 Pan API Documentation](https://123yunpan.yuque.com/org-wiki-123yunpan-muaork/cr6ced)
+
+## 5. Per-provider authentication
+
+| Provider | Auth mechanism |
+|----------|----------------|
+| Google Drive, OneDrive, Dropbox, Box, Aliyun, 123 | `Authorization: Bearer <token>` header (default) |
+| Baidu Pan | `access_token` query parameter on every request |
+| Drive115 | OSS `Authorization` headers on upload endpoints; no generic Bearer |
+| WebDAV | HTTP Basic auth |
+
+Override `applyAuthorization(to:params:credential:)` on a provider subclass if you need custom behavior.
+
+## 6. Large files
+
+Use `uploadFile` or `CloudResumableUploading` (Google Drive and OneDrive). Do not use `uploadData` for files larger than a few megabytes.

@@ -14,20 +14,13 @@ Easy to integrate cloud service using Oauth2. Supported platforms:
 
 ## Requirements
 
-- Swift 5.0 +
-- Xcode 12 +
-- iOS 13.0 +
+- Swift 6.0 +
+- Xcode 15 +
+- iOS 17.0 + / tvOS 17.0 + / macOS 14.0 + (due to Swift 6 concurrency and `@MainActor` provider isolation)
 
 ## Installation
 
-#### CocoaPods
-CloudServiceKit is available through CocoaPods. To install it, simply add the following line to your Podfile:
-
-```bash
-pod 'CloudServiceKit'
-```
-
-#### Swift Package Manager
+### Swift Package Manager
 
 The Swift Package Manager is a tool for automating the distribution of Swift code and is integrated into the swift compiler.
 
@@ -38,6 +31,17 @@ dependencies: [
     .package(url: "https://github.com/alexiscn/CloudServiceKit.git", from: "1.0.0")
 ]
 ```
+
+## Large file uploads
+
+For multi-GB files, **never** use `uploadData(_:filename:to:)` — it loads the entire file into memory.
+
+Use instead:
+
+- `uploadFile(_:to:progressHandler:)` — chunked upload from a local file URL
+- `CloudResumableUploading` — `beginUpload` / `uploadChunk` / `finishUpload` with a persistable `CloudUploadSession` (Google Drive and OneDrive)
+
+File chunk reads run off the main actor via `FileChunkReader` so UI stays responsive during uploads.
 
 ## Quick Start
 

@@ -42,3 +42,26 @@ let connector = OneDriveConnector(
 // In your View Controller
 try await connector.connectWithASWebAuthenticationSession(viewController: self)
 ```
+
+## 4. Large file uploads
+
+Files larger than 4 MB use Microsoft Graph **upload sessions**. Chunk size is aligned to **320 KiB × 12** (3,932,160 bytes) per Graph requirements.
+
+```swift
+let provider = OneDriveServiceProvider(credential: credential)
+
+// Chunked upload from a local file URL
+try await provider.uploadFile(localFileURL, to: folder, progressHandler: nil)
+
+// Resumable API with persistable session state
+var session = try await provider.beginUpload(
+    fileURL: localFileURL,
+    filename: "clip.mov",
+    to: folder,
+    contentType: "video/quicktime"
+)
+session = try await provider.uploadAllChunks(session: &session) { progress in }
+let remoteItem = try await provider.finishUpload(session: session)
+```
+
+Persist `CloudUploadSession` as JSON to resume after app restart. File chunk IO uses `FileChunkReader` and does not block the main actor.

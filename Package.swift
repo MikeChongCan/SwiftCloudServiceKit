@@ -30,8 +30,7 @@ let package = Package(
         .target(
             name: "CloudServiceKit",
             dependencies: ["OAuthSwift"],
-            path: "Sources",
-            exclude: ["CloudServiceKitExampleCLI"]),
+            path: "Sources"),
         .executableTarget(
             name: "CloudServiceKitExampleCLI",
             dependencies: [

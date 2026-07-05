@@ -2,6 +2,7 @@ import Foundation
 
 public struct AnyCodable: Codable, Hashable, Sendable {
     private enum Storage: Codable, Hashable, Sendable {
+        case null
         case string(String)
         case int(Int)
         case double(Double)
@@ -15,6 +16,7 @@ public struct AnyCodable: Codable, Hashable, Sendable {
     
     public var value: Any {
         switch storage {
+        case .null: return NSNull()
         case .string(let val): return val
         case .int(let val): return val
         case .double(let val): return val
@@ -26,7 +28,9 @@ public struct AnyCodable: Codable, Hashable, Sendable {
     }
     
     public init(_ value: Any) {
-        if let anyCodable = value as? AnyCodable {
+        if value is NSNull {
+            self.storage = .null
+        } else if let anyCodable = value as? AnyCodable {
             self.storage = anyCodable.storage
         } else if let val = value as? String {
             self.storage = .string(val)
@@ -50,13 +54,13 @@ public struct AnyCodable: Codable, Hashable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {
-            self.storage = .string("")
+            self.storage = .null
         } else if let val = try? container.decode(Bool.self) {
             self.storage = .bool(val)
-        } else if let val = try? container.decode(Int.self) {
-            self.storage = .int(val)
         } else if let val = try? container.decode(Double.self) {
             self.storage = .double(val)
+        } else if let val = try? container.decode(Int.self) {
+            self.storage = .int(val)
         } else if let val = try? container.decode(String.self) {
             self.storage = .string(val)
         } else if let val = try? container.decode([String: AnyCodable].self) {
@@ -71,6 +75,8 @@ public struct AnyCodable: Codable, Hashable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         switch storage {
+        case .null:
+            try container.encodeNil()
         case .string(let val):
             try container.encode(val)
         case .int(let val):

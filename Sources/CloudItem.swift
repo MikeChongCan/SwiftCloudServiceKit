@@ -7,8 +7,6 @@
 
 import Foundation
 
-import Foundation
-
 /// The representation of file/folder item.
 /// You can create your own cloud file model and parse with the `json` property.
 public struct CloudItem: Hashable, Codable, Sendable {

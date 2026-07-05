@@ -28,16 +28,26 @@ public final class GoogleDriveServiceProvider: CloudServiceProvider {
     
     public var refreshAccessTokenHandler: CloudRefreshAccessTokenHandler?
     
+    public let session: URLSession
+    
     public var sharedDrive: SharedDrive?
     
     public var contentsOfDirectoryQueryTerm: String = "trashed = false"
     
     public var contentsOfDirectoryFields: String = "nextPageToken, files(id, name, mimeType, size, createdTime, modifiedTime, md5Checksum, parents)"
     
-    private let chunkSize: Int64 = 6 * 1024 * 1024 // 6MB
+    public let uploadChunkSize: Int64 = 6 * 1024 * 1024 // 6MB
+    
+    private var chunkSize: Int64 { uploadChunkSize }
     
     required public init(credential: URLCredential?) {
         self.credential = credential
+        self.session = .shared
+    }
+    
+    public init(credential: URLCredential?, session: URLSession) {
+        self.credential = credential
+        self.session = session
     }
     
     public struct SharedDrive: Codable, Sendable {
@@ -102,7 +112,7 @@ public final class GoogleDriveServiceProvider: CloudServiceProvider {
             } else {
                 throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult())
             }
-        } while pageToken != nil && !pageToken!.isEmpty
+        } while pageToken.map { !$0.isEmpty } ?? false
         
         for i in 0..<items.count {
             items[i].fixPath(with: directory)
@@ -216,7 +226,7 @@ public final class GoogleDriveServiceProvider: CloudServiceProvider {
             } else {
                 throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult())
             }
-        } while pageToken != nil && !pageToken!.isEmpty
+        } while pageToken.map { !$0.isEmpty } ?? false
         
         return items
     }
@@ -280,7 +290,8 @@ public final class GoogleDriveServiceProvider: CloudServiceProvider {
     public func searchFiles(keyword: String) async throws -> [CloudItem] {
         let url = apiURL.appendingPathComponent("files")
         var params: [String: Any] = [:]
-        params["q"] = "name contains '\(keyword)' and trashed = false"
+        let escapedKeyword = keyword.replacingOccurrences(of: "'", with: "\\'")
+        params["q"] = "name contains '\(escapedKeyword)' and trashed = false"
         params["fields"] = contentsOfDirectoryFields
         if let sharedDrive = sharedDrive {
             params["supportsAllDrives"] = true
@@ -297,6 +308,7 @@ public final class GoogleDriveServiceProvider: CloudServiceProvider {
     }
     
     /// Upload file data to target directory.
+    /// - Warning: Loads the entire payload into memory. For files larger than 4 MB, use `uploadFile` or `CloudResumableUploading` instead.
     public func uploadData(_ data: Data, filename: String, to directory: CloudItem, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
         let url = uploadURL.appendingPathComponent("files")
         var params = ["uploadType": "multipart"]
@@ -347,9 +359,9 @@ public final class GoogleDriveServiceProvider: CloudServiceProvider {
         let json: [String: Any] = ["name": fileURL.lastPathComponent, "parents": [directory.id]]
         let response = try await post(url: url, params: params, json: json, headers: headers)
         
-        if let uploadUrl = response.response?.headers["Location"] as? String {
-            let session = UploadSession(fileURL: fileURL, size: totalSize, uploadUrl: uploadUrl)
-            return try await uploadFile(session, offset: 0, progressHandler: progressHandler)
+        if let uploadUrl = response.response?.header("Location") {
+            let uploadSession = UploadSession(fileURL: fileURL, size: totalSize, uploadUrl: uploadUrl)
+            return try await uploadFileChunks(session: uploadSession, progressHandler: progressHandler)
         } else {
             throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult())
         }
@@ -357,33 +369,109 @@ public final class GoogleDriveServiceProvider: CloudServiceProvider {
 }
 
 // MARK: - Resumable Upload
-extension GoogleDriveServiceProvider {
+extension GoogleDriveServiceProvider: CloudResumableUploading {
     
-    private func uploadFile(_ session: UploadSession, offset: Int64, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
+    public func beginUpload(
+        fileURL: URL,
+        filename: String,
+        to directory: CloudItem,
+        contentType: String? = nil
+    ) async throws -> CloudUploadSession {
+        guard FileManager.default.fileExists(atPath: fileURL.path), let totalSize = fileSize(of: fileURL) else {
+            throw CloudServiceError.uploadFileNotExist
+        }
         
-        let length = min(chunkSize, session.size - offset)
-        let handle = try FileHandle(forReadingFrom: session.fileURL)
-        try handle.seek(toOffset: UInt64(offset))
-        let data = handle.readData(ofLength: Int(length))
-        try handle.close()
+        let url = uploadURL.appendingPathComponent("files")
+        var params: [String: Any] = ["uploadType": "resumable"]
+        if sharedDrive != nil {
+            params["supportsAllDrives"] = true
+        }
+        var headers: [String: String] = [
+            "X-Upload-Content-Type": contentType ?? "application/octet-stream",
+            "X-Upload-Content-Length": "\(totalSize)",
+            "Content-Type": "application/json; charset=UTF-8"
+        ]
+        let json: [String: Any] = ["name": filename, "parents": [directory.id]]
+        let response = try await post(url: url, params: params, json: json, headers: headers)
+        
+        guard let uploadUrl = response.response?.header("Location") else {
+            throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult())
+        }
+        
+        return CloudUploadSession(
+            provider: name,
+            fileURL: fileURL,
+            filename: filename,
+            directoryID: directory.id,
+            totalBytes: totalSize,
+            sessionToken: uploadUrl
+        )
+    }
+    
+    public func uploadChunk(
+        session: inout CloudUploadSession,
+        progressHandler: (@Sendable (Progress) -> Void)? = nil
+    ) async throws -> CloudUploadSession {
+        guard !session.isComplete else { return session }
+        
+        let offset = session.uploadedBytes
+        let length = min(chunkSize, session.totalBytes - offset)
+        let data = try await FileChunkReader.readChunk(from: session.fileURL, offset: offset, length: Int(length))
         
         var headers: [String: String] = [:]
         headers["Content-Length"] = "\(length)"
-        headers["Content-Range"] = "bytes \(offset)-\(offset + length - 1)/\(session.size)"
+        headers["Content-Range"] = "bytes \(offset)-\(offset + length - 1)/\(session.totalBytes)"
         headers["Content-Type"] = "application/octet-stream"
         
-        let progressReport = Progress(totalUnitCount: session.size)
-        let response = try await put(url: session.uploadUrl, headers: headers, requestBody: data, progressHandler: { progress in
+        let progressReport = Progress(totalUnitCount: session.totalBytes)
+        let response = try await put(url: session.sessionToken, headers: headers, requestBody: data, progressHandler: { progress in
             progressReport.completedUnitCount = offset + Int64(Float(length) * progress.percent)
             progressHandler?(progressReport)
         })
         
-        let nextOffset = offset + length
-        if nextOffset >= session.size {
-            return response
-        } else {
-            return try await uploadFile(session, offset: nextOffset, progressHandler: progressHandler)
+        session.uploadedBytes = offset + length
+        
+        if session.isComplete, let json = response.response?.json as? [String: Any], let id = json["id"] as? String {
+            session.remoteFileID = id
         }
+        
+        return session
+    }
+    
+    public func finishUpload(session: CloudUploadSession) async throws -> CloudItem {
+        if let remoteFileID = session.remoteFileID {
+            return try await attributesOfItem(CloudItem(id: remoteFileID, name: session.filename, path: session.filename))
+        }
+        throw CloudServiceError.responseDecodeError(HTTPResult())
+    }
+    
+    private func uploadFileChunks(
+        session: UploadSession,
+        progressHandler: (@Sendable (Progress) -> Void)? = nil
+    ) async throws -> CloudResponse<HTTPResult, Error> {
+        var offset = Int64(0)
+        var lastResponse: CloudResponse<HTTPResult, Error>?
+        let progressReport = Progress(totalUnitCount: session.size)
+        
+        while offset < session.size {
+            let length = min(chunkSize, session.size - offset)
+            let chunkOffset = offset
+            let data = try await FileChunkReader.readChunk(from: session.fileURL, offset: chunkOffset, length: Int(length))
+            
+            var headers: [String: String] = [:]
+            headers["Content-Length"] = "\(length)"
+            headers["Content-Range"] = "bytes \(chunkOffset)-\(chunkOffset + length - 1)/\(session.size)"
+            headers["Content-Type"] = "application/octet-stream"
+            
+            let response = try await put(url: session.uploadUrl, headers: headers, requestBody: data, progressHandler: { progress in
+                progressReport.completedUnitCount = chunkOffset + Int64(Float(length) * progress.percent)
+                progressHandler?(progressReport)
+            })
+            lastResponse = response
+            offset = chunkOffset + length
+        }
+        
+        return lastResponse ?? CloudResponse(response: HTTPResult(), result: .success(HTTPResult()))
     }
 }
 

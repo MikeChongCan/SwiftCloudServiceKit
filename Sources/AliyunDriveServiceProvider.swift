@@ -302,7 +302,7 @@ extension AliyunDriveServiceProvider {
             try fileHandle.close()
             return Insecure.SHA1.hash(data: data).toHexString()
         } catch {
-            print(error)
+            // silent failure
         }
         return nil
     }
@@ -327,7 +327,7 @@ extension AliyunDriveServiceProvider {
             try fileHandle.close()
             return sha1.finalize().toHexString().uppercased()
         } catch {
-            print(error)
+            // silent failure
         }
         return nil
     }
@@ -349,7 +349,7 @@ extension AliyunDriveServiceProvider {
             try fileHandle.close()
             return subdata.base64EncodedString()
         } catch {
-            print(error)
+            // silent failure
         }
         return nil
     }
@@ -418,10 +418,10 @@ extension AliyunDriveServiceProvider: CloudServiceResponseProcessing {
         item.fileHash = json["content_hash"] as? String
         
         if let created = json["created_at"] as? String {
-            item.creationDate = ISO3601DateFormatter.shared.date(from: created)
+            item.creationDate = ISO8601DateFormatter.shared.date(from: created)
         }
         if let updated = json["updated_at"] as? String {
-            item.modificationDate = ISO3601DateFormatter.shared.date(from: updated)
+            item.modificationDate = ISO8601DateFormatter.shared.date(from: updated)
         }
         return item
     }

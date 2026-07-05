@@ -56,12 +56,23 @@ public class WebDAVServiceProvider: NSObject, CloudServiceProvider, @unchecked S
     }
     
     private func url(for path: String) -> URL {
-        let scheme = endpoint.scheme ?? "http"
-        let host = endpoint.host ?? "localhost"
-        let portStr = endpoint.port != nil ? ":\(endpoint.port!)" : ""
-        let hostUrl = "\(scheme)://\(host)\(portStr)"
+        let basePath = endpoint.path.hasSuffix("/") ? endpoint.path : endpoint.path + "/"
         let normalizedPath = path.hasPrefix("/") ? path : "/" + path
-        return URL(string: hostUrl + normalizedPath) ?? endpoint
+        
+        if normalizedPath.hasPrefix(basePath) {
+            let scheme = endpoint.scheme ?? "http"
+            let host = endpoint.host ?? "localhost"
+            let portStr = endpoint.port != nil ? ":\(endpoint.port!)" : ""
+            let hostUrl = "\(scheme)://\(host)\(portStr)"
+            return URL(string: hostUrl + normalizedPath) ?? endpoint
+        } else {
+            var base = endpoint
+            if !base.path.hasSuffix("/") {
+                base = base.appendingPathComponent("")
+            }
+            let relative = path.hasPrefix("/") ? String(path.dropFirst()) : path
+            return URL(string: relative, relativeTo: base) ?? base.appendingPathComponent(relative)
+        }
     }
     
     private func makeRequest(method: String, url: URL, headers: [String: String] = [:], body: Data? = nil) async throws -> (Data, HTTPURLResponse) {
@@ -368,18 +379,22 @@ public class WebDAVServiceProvider: NSObject, CloudServiceProvider, @unchecked S
         return nil
     }
     
-    public func shouldProcessResponse(_ response: HTTPResult) -> Bool {
-        return false
-    }
-    
     public func isUnauthorizedResponse(_ response: HTTPResult) -> Bool {
-        return (response.response as? HTTPURLResponse)?.statusCode == 401
+        return response.statusCode == 401
     }
 }
 
 // MARK: - WebDAVXMLParser
 
 final class WebDAVXMLParser: NSObject, XMLParserDelegate {
+    
+    private static let lastModifiedFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
     
     struct ParsedItem: Sendable {
         var href: String = ""
@@ -436,11 +451,7 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
         } else if name == "getcontentlength" {
             currentItem?.contentLength = Int64(text) ?? 0
         } else if name == "getlastmodified" {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.timeZone = TimeZone(secondsFromGMT: 0)
-            currentItem?.lastModified = formatter.date(from: text)
+            currentItem?.lastModified = Self.lastModifiedFormatter.date(from: text)
         } else if name == "getetag" {
             currentItem?.etag = text.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
         }

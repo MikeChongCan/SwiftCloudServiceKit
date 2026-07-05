@@ -22,6 +22,11 @@ public final class BaiduPanServiceProvider: CloudServiceProvider {
     
     public var credential: URLCredential?
     
+    public func applyAuthorization(to request: inout URLRequest, params: inout [String: Any], credential: URLCredential?) {
+        guard let token = credential?.password else { return }
+        params["access_token"] = token
+    }
+    
     public var rootItem: CloudItem { CloudItem(id: "0", name: name, path: "/") }
     
     public var appName: String = ""
@@ -125,7 +130,7 @@ public final class BaiduPanServiceProvider: CloudServiceProvider {
     
     /// Get information about the current user's account.
     public func getCurrentUserInfo() async throws -> CloudUser {
-        let url = apiURL.appendingPathComponent("nas")
+        let url = apiURL.appendingPathComponent("xpan/nas")
         let params = ["method": "uinfo"]
         let response = try await get(url: url, params: params)
         if let json = response.response?.json as? [String: Any],

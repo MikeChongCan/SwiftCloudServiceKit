@@ -1,6 +1,6 @@
 # CloudServiceKit
 
-Swift Package · iOS 13+ / tvOS 14+ · Depends on OAuthSwift
+Swift Package · iOS 17+ / tvOS 17+ / macOS 14+ · Depends on OAuthSwift
 
 ## Architecture
 
@@ -8,8 +8,9 @@ Swift Package · iOS 13+ / tvOS 14+ · Depends on OAuthSwift
 - `CloudServiceProvider` protocol defines the file-ops contract; each provider subclass (e.g. `DropboxServiceProvider`) implements it.
 - `CloudServiceConnector` is the OAuth2 base class; per-service connectors subclass it.
 - `CloudItem` is the universal file/folder model; providers parse service JSON into it via `cloudItemFromJSON(_:)`.
-- `Just.swift` is a vendored HTTP helper — treat it as a dependency, not project code.
-- Completion handlers fire on the **main thread** by convention.
+- The library uses a native, modern `URLSession` async/await request engine (replacing `Just.swift`).
+- `CloudResumableUploading` + `CloudUploadSession` support pause/resume for Google Drive and OneDrive; chunk reads use `FileChunkReader` (`Task { @concurrent in ... }`) off the main actor.
+- Completion handlers and async provider calls run on the **main thread** (via `@MainActor` isolation).
 
 ## Gotchas
 
@@ -23,4 +24,4 @@ Swift Package · iOS 13+ / tvOS 14+ · Depends on OAuthSwift
 
 - Follow existing patterns: one file per provider, class names end in `ServiceProvider` or `Connector`.
 - Keep public API documented with `///` doc comments.
-- No tests exist yet — when adding, create a `Tests/` directory and register in Package.swift.
+- Tests live in `Tests/CloudServiceKitTests/` and are registered in `Package.swift`.

@@ -55,3 +55,28 @@ let connector = GoogleDriveConnector(
 // In your View Controller
 try await connector.connectWithASWebAuthenticationSession(viewController: self)
 ```
+
+## 4. Large file uploads
+
+For clips or other multi-GB files, use **`uploadFile(_:to:progressHandler:)`** or the resumable API — never `uploadData`, which loads the entire file into memory.
+
+```swift
+let provider = GoogleDriveServiceProvider(credential: credential)
+
+// One-shot chunked upload from disk
+try await provider.uploadFile(localFileURL, to: folder, progressHandler: { progress in
+    // update UI on main actor
+})
+
+// Pause/resume: persist CloudUploadSession to JSON between chunks
+var session = try await provider.beginUpload(
+    fileURL: localFileURL,
+    filename: "clip.mov",
+    to: folder,
+    contentType: "video/quicktime"
+)
+session = try await provider.uploadAllChunks(session: &session) { progress in }
+let remoteItem = try await provider.finishUpload(session: session)
+```
+
+Chunk reads run off the main actor via `FileChunkReader` so uploads do not block UI.

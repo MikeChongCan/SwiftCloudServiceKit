@@ -24,7 +24,7 @@ extension Array {
 extension Dictionary {
     var json: String {
         let data = (try? JSONSerialization.data(withJSONObject: self, options: .fragmentsAllowed)) ?? Data()
-        return String(data: data, encoding: .utf8) ?? "[]"
+        return String(data: data, encoding: .utf8) ?? "{}"
     }
 }
 
@@ -47,7 +47,7 @@ extension String {
     /// alphanumerics and a few other characters compared to standard query encoding.
     var urlEncoded: String {
         let customAllowedSet = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
-        return self.addingPercentEncoding(withAllowedCharacters: customAllowedSet)!
+        return self.addingPercentEncoding(withAllowedCharacters: customAllowedSet) ?? self
     }
 }
 

@@ -87,4 +87,71 @@ final class GoogleDriveServiceProviderTests: XCTestCase {
         XCTAssertFalse(items.first!.isDirectory)
         XCTAssertEqual(items.first?.size, 500000)
     }
+    
+    func test_HTTPResult_headerLookupIsCaseInsensitive() {
+        let response = HTTPURLResponse(
+            url: URL(string: "https://example.com")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Location": "https://example.com/upload", "Content-Type": "application/json"]
+        )!
+        let result = HTTPResult(data: nil, response: response)
+        
+        XCTAssertEqual(result.header("Location"), "https://example.com/upload")
+        XCTAssertEqual(result.header("location"), "https://example.com/upload")
+        XCTAssertEqual(result.header("LOCATION"), "https://example.com/upload")
+        XCTAssertEqual(result.header("Content-Type"), "application/json")
+        XCTAssertEqual(result.header("content-type"), "application/json")
+    }
+    
+    func test_GoogleDrive_uploadFile_extractsResumableLocation() async throws {
+        var createSessionCalled = false
+        var uploadChunkCalled = false
+        
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path.contains("/files") == true && request.httpMethod == "POST" {
+                createSessionCalled = true
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["location": "https://example.com/resumable-upload-url"]
+                )!
+                return (response, nil)
+            } else if request.url?.absoluteString == "https://example.com/resumable-upload-url" {
+                uploadChunkCalled = true
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: [:]
+                )!
+                let jsonResponse = """
+                {
+                    "id": "file_id_123",
+                    "name": "test.txt"
+                }
+                """
+                return (response, jsonResponse.data(using: .utf8))
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: [:])!
+            return (response, nil)
+        }
+        
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileURL = tempDir.appendingPathComponent("test.txt")
+        try "hello world".data(using: .utf8)?.write(to: fileURL)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        
+        let targetDirectory = CloudItem(id: "parent_id_456", name: "parent", path: "/parent")
+        let response = try await provider.uploadFile(fileURL, to: targetDirectory, progressHandler: nil)
+        
+        XCTAssertTrue(createSessionCalled)
+        XCTAssertTrue(uploadChunkCalled)
+        if case .success(let result) = response.result {
+            XCTAssertEqual(result.statusCode, 200)
+        } else {
+            XCTFail("Upload failed: \(response)")
+        }
+    }
 }

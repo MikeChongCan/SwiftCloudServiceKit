@@ -224,7 +224,7 @@ public class BaiduPanConnector: CloudServiceConnector {
     /// The OAuth2 url, which is `https://openapi.baidu.com/oauth/2.0/authorize`.
     public override var authorizeUrl: String {
         #if canImport(UIKit)
-        if UIScreen.main.traitCollection.userInterfaceIdiom == .pad {
+        if UIDevice.current.userInterfaceIdiom == .pad {
             return "https://openapi.baidu.com/oauth/2.0/authorize?display=pad&force_login=1"
         }
         #endif
@@ -340,8 +340,23 @@ public class Drive115Connector: CloudServiceConnector {
     }
     
     public override func renewToken(with refreshToken: String, completion: @escaping (Result<OAuthSwift.TokenSuccess, Error>) -> Void) {
-        // pCloud OAuth does not respond with a refresh token, so renewToken is unsupported.
-        completion(.failure(CloudServiceError.unsupported))
+        Task {
+            do {
+                let payload = try await refreshAccessToken(refreshToken: refreshToken)
+                let credential = OAuthSwiftCredential(consumerKey: self.appId, consumerSecret: "")
+                credential.oauthToken = payload.accessToken
+                credential.oauthRefreshToken = payload.refreshToken
+                
+                let success: OAuthSwift.TokenSuccess = (
+                    credential: credential,
+                    response: nil,
+                    parameters: [:]
+                )
+                completion(.success(success))
+            } catch {
+                completion(.failure(error))
+            }
+        }
     }
     
     public struct QRCode {
@@ -358,7 +373,7 @@ public class Drive115Connector: CloudServiceConnector {
     }
     
     public func fetchAuthQRCode() async throws -> QRCode {
-        let codeVerifier = generateCodeVerifier(count: 32)
+        let codeVerifier = try generateCodeVerifier(count: 32)
         self.codeVerifier = codeVerifier
         let codeChallenge = codeChallenge(fromVerifier: codeVerifier)
         return try await generateDeviceCode(appId: appId, codeChallenge: codeChallenge)
@@ -514,17 +529,26 @@ public class Drive115Connector: CloudServiceConnector {
 }
 
 extension Drive115Connector {
-    private func generateCodeVerifier(count: Int) -> String {
+    private func base64URLEncode(_ data: Data) -> String {
+        return data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private func generateCodeVerifier(count: Int) throws -> String {
         var octets = [UInt8](repeating: 0, count: count)
         let status = SecRandomCopyBytes(kSecRandomDefault, octets.count, &octets)
-        return Data(bytes: octets, count: octets.count).base64EncodedString()
+        guard status == errSecSuccess else {
+            throw CloudServiceError.serviceError(Int(status), "SecRandomCopyBytes failed")
+        }
+        return base64URLEncode(Data(octets))
     }
     
     private func codeChallenge(fromVerifier verifier: String) -> String {
         let verifierData = verifier.data(using: .ascii)!
         let challengeHashed = SHA256.hash(data: verifierData)
-        let challengeBase64Encoded = Data(challengeHashed).base64EncodedString()
-        return challengeBase64Encoded
+        return base64URLEncode(Data(challengeHashed))
     }
 }
 
@@ -541,7 +565,7 @@ public class Drive123Connector: CloudServiceConnector {
     }
     
     private var defaultScope = "user:base,file:all:read,file:all:write"
-    /// The scope to access OneDrive service. The default value is `offline_access User.Read Files.ReadWrite.All`.
+    /// The scope to access 123Pan service.
     public override var scope: String {
         get { return defaultScope }
         set { defaultScope = newValue }

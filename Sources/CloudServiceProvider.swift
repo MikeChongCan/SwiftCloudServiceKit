@@ -259,16 +259,6 @@ extension CloudServiceProvider {
 // Default implementation of CloudServiceProvider
 extension CloudServiceProvider {
     
-    public var refreshAccessTokenHandler: CloudRefreshAccessTokenHandler? {
-        get { return nil }
-        set { }
-    }
-    
-    public var delegate: CloudServiceProviderDelegate? {
-        get { return nil }
-        set { }
-    }
-    
     public func shouldProcessResponse(_ response: HTTPResult, completion: @escaping CloudCompletionHandler) -> Bool {
         return false
     }
@@ -276,6 +266,15 @@ extension CloudServiceProvider {
     public func isUnauthorizedResponse(_ response: HTTPResult) -> Bool {
         // most cloud service use http code 401 as unauthorized response
         return response.statusCode == 401
+    }
+    
+    public func applyAuthorization(to request: inout URLRequest, params: inout [String: Any], credential: URLCredential?) {
+        guard let token = credential?.password else { return }
+        if name == "BaiduPan" {
+            params["access_token"] = token
+        } else if name != "Drive115" {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
     }
 }
 
@@ -288,9 +287,9 @@ extension CloudServiceProvider {
         }
         do {
             let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
-            return attributes[.size] as? Int64
+            return (attributes[.size] as? NSNumber)?.int64Value
         } catch {
-            print(error)
+            // silent failure
         }
         return nil
     }
@@ -364,6 +363,10 @@ public struct HTTPResult: Sendable {
         self.content = data
         self.response = response
         self.error = error
+    }
+    
+    public func header(_ name: String) -> String? {
+        return headers[name.lowercased()] as? String
     }
     
     public var data: Data? {
@@ -502,11 +505,14 @@ extension CloudServiceProvider {
         }
     }
     
-    private func query(_ params: [String: Any]) -> String {
+    func query(_ params: [String: Any]) -> String {
+        let queryAllowed = CharacterSet(
+            charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+        )
         var parts: [String] = []
         for (key, val) in params {
-            let keyString = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
-            let valString = "\(val)".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "\(val)"
+            let keyString = key.addingPercentEncoding(withAllowedCharacters: queryAllowed) ?? key
+            let valString = "\(val)".addingPercentEncoding(withAllowedCharacters: queryAllowed) ?? "\(val)"
             parts.append("\(keyString)=\(valString)")
         }
         return parts.joined(separator: "&")
@@ -567,12 +573,13 @@ extension CloudServiceProvider {
         _ method: HTTPMethod,
         url urlConvertible: URLComponentsConvertible,
         params: [String: Any] = [:],
-        data: [String: Any] = [:],
+        data formData: [String: Any] = [:],
         json: Any? = nil,
         headers: [String: String] = [:],
         files: [String: HTTPFile] = [:],
         requestBody: Data? = nil,
         progressHandler: (@Sendable (HTTPProgress) -> Void)? = nil,
+        retryCount: Int = 0,
         completion: @escaping CloudCompletionHandler
     ) {
         guard let url = urlConvertible.urlComponents?.url else {
@@ -581,10 +588,16 @@ extension CloudServiceProvider {
             return
         }
         
+        var request = URLRequest(url: url)
+        request.httpMethod = method.rawValue
+        
+        var finalParams = params
+        applyAuthorization(to: &request, params: &finalParams, credential: credential)
+        
         var finalURL = url
-        if !params.isEmpty {
+        if !finalParams.isEmpty {
             var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
-            let qString = query(params)
+            let qString = query(finalParams)
             if !qString.isEmpty {
                 comps?.percentEncodedQuery = qString
             }
@@ -592,14 +605,7 @@ extension CloudServiceProvider {
                 finalURL = u
             }
         }
-        
-        var request = URLRequest(url: finalURL)
-        request.httpMethod = method.rawValue
-        
-        var httpheaders = headers
-        if let token = credential?.password {
-            httpheaders["Authorization"] = "Bearer \(token)"
-        }
+        request.url = finalURL
         
         var bodyData: Data?
         var contentType: String?
@@ -608,17 +614,17 @@ extension CloudServiceProvider {
             bodyData = requestData
         } else if !files.isEmpty {
             let boundary = "CloudServiceKitBoundary-\(UUID().uuidString)"
-            bodyData = synthesizeMultipartBody(data, files: files, boundary: boundary)
+            bodyData = synthesizeMultipartBody(formData, files: files, boundary: boundary)
             contentType = "multipart/form-data; boundary=\(boundary)"
         } else if let requestJSON = json {
             bodyData = try? JSONSerialization.data(withJSONObject: requestJSON, options: [])
             contentType = "application/json"
-        } else if !data.isEmpty {
+        } else if !formData.isEmpty {
             if headers["Content-Type"]?.lowercased() == "application/json" || headers["content-type"]?.lowercased() == "application/json" {
-                bodyData = try? JSONSerialization.data(withJSONObject: data, options: [])
+                bodyData = try? JSONSerialization.data(withJSONObject: formData, options: [])
                 contentType = "application/json"
             } else {
-                bodyData = query(data).data(using: .utf8)
+                bodyData = query(formData).data(using: .utf8)
                 contentType = "application/x-www-form-urlencoded"
             }
         }
@@ -626,7 +632,7 @@ extension CloudServiceProvider {
         if let content = contentType {
             request.setValue(content, forHTTPHeaderField: "Content-Type")
         }
-        for (key, val) in httpheaders {
+        for (key, val) in headers {
             request.setValue(val, forHTTPHeaderField: key)
         }
         request.httpBody = bodyData
@@ -653,11 +659,13 @@ extension CloudServiceProvider {
                                     method: method,
                                     url: urlConvertible,
                                     params: params,
-                                    data: data, // Note: passing empty dictionary for data because handleResponse doesn't parse it
+                                    formData: formData,
                                     json: json,
                                     headers: headers,
+                                    files: files,
                                     requestBody: requestBody,
                                     progressHandler: progressHandler,
+                                    retryCount: retryCount,
                                     completion: completion)
             } catch {
                 let result = HTTPResult(error: error)
@@ -671,22 +679,27 @@ extension CloudServiceProvider {
         method: HTTPMethod,
         url: URLComponentsConvertible,
         params: [String: Any] = [:],
-        data: Any = [:],
+        formData: [String: Any] = [:],
         json: Any? = nil,
         headers: [String: String] = [:],
+        files: [String: HTTPFile] = [:],
         requestBody: Data? = nil,
         progressHandler: (@Sendable (HTTPProgress) -> Void)? = nil,
+        retryCount: Int = 0,
         completion: @escaping CloudCompletionHandler
     ) {
-        if isUnauthorizedResponse(response) {
+        if isUnauthorizedResponse(response) && retryCount < 1 {
             if let refreshAccessTokenHandler = refreshAccessTokenHandler {
                 Task {
                     do {
                         let newCredential = try await refreshAccessTokenHandler()
                         self.credential = newCredential
                         self.request(method, url: url,
-                                     params: params, headers: headers,
-                                     progressHandler: progressHandler, completion: completion)
+                                     params: params, data: formData,
+                                     json: json, headers: headers,
+                                     files: files, requestBody: requestBody,
+                                     progressHandler: progressHandler,
+                                     retryCount: retryCount + 1, completion: completion)
                     } catch {
                         completion(CloudResponse(response: response, result: .failure(error)))
                     }
@@ -699,8 +712,11 @@ extension CloudServiceProvider {
                             let newCredential = try await delegate.renewAccessToken(withRefreshToken: refreshToken)
                             self.credential = newCredential
                             self.request(method, url: url,
-                                         params: params, headers: headers,
-                                         progressHandler: progressHandler, completion: completion)
+                                         params: params, data: formData,
+                                         json: json, headers: headers,
+                                         files: files, requestBody: requestBody,
+                                         progressHandler: progressHandler,
+                                         retryCount: retryCount + 1, completion: completion)
                         } else {
                             completion(CloudResponse(response: response, result: .failure(CloudServiceError.unsupported)))
                         }
@@ -718,26 +734,31 @@ extension CloudServiceProvider {
     }
 }
 
-struct ISO3601DateFormatter: Sendable {
-    static let shared = ISO3601DateFormatter()
+struct ISO8601DateFormatter: Sendable {
+    static let shared = ISO8601DateFormatter()
 
     private let secondsDateFormatter = DateFormatter()
-    private let milisecondsDateFormatter = DateFormatter()
+    private let millisecondsDateFormatter = DateFormatter()
 
     init() {
         secondsDateFormatter.dateFormat = "yyyy'-'MM'-'dd'T'HH':'mm':'ssZ"
-        milisecondsDateFormatter.dateFormat = "yyyy'-'MM'-'dd'T'HH':'mm':'ss'.'SSSZ"
+        secondsDateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        secondsDateFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+        
+        millisecondsDateFormatter.dateFormat = "yyyy'-'MM'-'dd'T'HH':'mm':'ss'.'SSSZ"
+        millisecondsDateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        millisecondsDateFormatter.timeZone = TimeZone(secondsFromGMT: 0)
     }
     
     func date(from dateString: String) -> Date? {
-        return (secondsDateFormatter.date(from: dateString)
-                    ?? milisecondsDateFormatter.date(from: dateString))
+        return secondsDateFormatter.date(from: dateString)
+            ?? millisecondsDateFormatter.date(from: dateString)
     }
     
     func date(fromBytes bytes: ArraySlice<UInt8>) -> Date? {
         guard let dateString = String(bytes: Array(bytes), encoding: .ascii) else { return nil }
-        return (secondsDateFormatter.date(from: dateString)
-            ?? milisecondsDateFormatter.date(from: dateString))
+        return secondsDateFormatter.date(from: dateString)
+            ?? millisecondsDateFormatter.date(from: dateString)
     }
 }
 
