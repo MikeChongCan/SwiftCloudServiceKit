@@ -270,14 +270,21 @@ extension OneDriveServiceProvider: CloudResumableUploading {
               let uploadUrl = json["uploadUrl"] as? String else {
             throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult())
         }
-        
+
+        var expiresAt: Date?
+        if let expiration = json["expirationDateTime"] as? String {
+            let formatter = ISO8601DateFormatter()
+            expiresAt = formatter.date(from: expiration)
+        }
+
         return CloudUploadSession(
             provider: name,
             fileURL: fileURL,
             filename: filename,
             directoryID: directory.id,
             totalBytes: totalSize,
-            sessionToken: uploadUrl
+            sessionToken: uploadUrl,
+            expiresAt: expiresAt
         )
     }
     
@@ -350,6 +357,28 @@ extension OneDriveServiceProvider: CloudResumableUploading {
             }
         }
         return lastResponse ?? CloudResponse(response: HTTPResult(), result: .success(HTTPResult()))
+    }
+}
+
+// MARK: - Background Upload
+extension OneDriveServiceProvider: CloudBackgroundUploading {
+    public nonisolated func chunkUploadPlan(
+        for session: CloudUploadSession,
+        preferredLength: Int64? = nil
+    ) throws -> UploadChunkPlan {
+        try OneDriveBackgroundUpload.chunkUploadPlan(for: session, preferredLength: preferredLength)
+    }
+
+    public nonisolated func parseChunkResponse(
+        _ response: HTTPURLResponse,
+        data: Data?,
+        for session: CloudUploadSession
+    ) -> UploadChunkOutcome {
+        OneDriveBackgroundUpload.parseChunkResponse(response, data: data, for: session)
+    }
+
+    public func queryUploadStatus(session: CloudUploadSession) async throws -> UploadChunkOutcome {
+        try await OneDriveBackgroundUpload.queryUploadStatus(session: session, urlSession: self.session)
     }
 }
 

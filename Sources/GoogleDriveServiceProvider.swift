@@ -475,6 +475,28 @@ extension GoogleDriveServiceProvider: CloudResumableUploading {
     }
 }
 
+// MARK: - Background Upload
+extension GoogleDriveServiceProvider: CloudBackgroundUploading {
+    public nonisolated func chunkUploadPlan(
+        for session: CloudUploadSession,
+        preferredLength: Int64? = nil
+    ) throws -> UploadChunkPlan {
+        try GoogleDriveBackgroundUpload.chunkUploadPlan(for: session, preferredLength: preferredLength)
+    }
+
+    public nonisolated func parseChunkResponse(
+        _ response: HTTPURLResponse,
+        data: Data?,
+        for session: CloudUploadSession
+    ) -> UploadChunkOutcome {
+        GoogleDriveBackgroundUpload.parseChunkResponse(response, data: data, for: session)
+    }
+
+    public func queryUploadStatus(session: CloudUploadSession) async throws -> UploadChunkOutcome {
+        try await GoogleDriveBackgroundUpload.queryUploadStatus(session: session, urlSession: self.session)
+    }
+}
+
 // MARK: - CloudServiceResponseProcessing
 extension GoogleDriveServiceProvider: CloudServiceResponseProcessing {
     

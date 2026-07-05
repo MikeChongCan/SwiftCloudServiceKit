@@ -28,7 +28,7 @@ Once you have your Swift package set up, adding CloudServiceKit as a dependency 
 
 ```bash
 dependencies: [
-    .package(url: "https://github.com/alexiscn/CloudServiceKit.git", from: "1.0.0")
+    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.2.0")
 ]
 ```
 
@@ -42,6 +42,8 @@ Use instead:
 - `CloudResumableUploading` — `beginUpload` / `uploadChunk` / `finishUpload` with a persistable `CloudUploadSession` (Google Drive and OneDrive)
 
 File chunk reads run off the main actor via `FileChunkReader` so UI stays responsive during uploads.
+
+For uploads that continue while the app is suspended, use **`CloudBackgroundUploading`** (0.2.0): `chunkUploadPlan`, `parseChunkResponse`, and `queryUploadStatus` build pure requests and parse delegate callbacks for a host-owned background `URLSession`. See [Docs/BackgroundUploadSupport.md](Docs/BackgroundUploadSupport.md).
 
 ## Quick Start
 

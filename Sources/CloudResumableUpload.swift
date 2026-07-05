@@ -9,6 +9,8 @@ import Foundation
 
 /// Snapshot of an in-progress resumable upload. Persist to JSON to resume after app restart.
 public struct CloudUploadSession: Codable, Sendable, Equatable {
+    /// Schema version for on-disk persistence. Additive evolution only; defaults to 1 when absent.
+    public let schemaVersion: Int
     public let provider: String
     public let fileURL: URL
     public let filename: String
@@ -33,8 +35,10 @@ public struct CloudUploadSession: Codable, Sendable, Equatable {
         uploadedBytes: Int64 = 0,
         sessionToken: String,
         remoteFileID: String? = nil,
-        expiresAt: Date? = nil
+        expiresAt: Date? = nil,
+        schemaVersion: Int = CloudUploadSession.currentSchemaVersion
     ) {
+        self.schemaVersion = schemaVersion
         self.provider = provider
         self.fileURL = fileURL
         self.filename = filename
@@ -45,6 +49,30 @@ public struct CloudUploadSession: Codable, Sendable, Equatable {
         self.remoteFileID = remoteFileID
         self.expiresAt = expiresAt
     }
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, provider, fileURL, filename, directoryID, totalBytes
+        case uploadedBytes, sessionToken, remoteFileID, expiresAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        provider = try container.decode(String.self, forKey: .provider)
+        fileURL = try container.decode(URL.self, forKey: .fileURL)
+        filename = try container.decode(String.self, forKey: .filename)
+        directoryID = try container.decode(String.self, forKey: .directoryID)
+        totalBytes = try container.decode(Int64.self, forKey: .totalBytes)
+        uploadedBytes = try container.decodeIfPresent(Int64.self, forKey: .uploadedBytes) ?? 0
+        sessionToken = try container.decode(String.self, forKey: .sessionToken)
+        remoteFileID = try container.decodeIfPresent(String.self, forKey: .remoteFileID)
+        expiresAt = try container.decodeIfPresent(Date.self, forKey: .expiresAt)
+    }
+}
+
+extension CloudUploadSession {
+    /// Current schema version for persisted upload sessions. Bump only with additive Codable fields.
+    public static let currentSchemaVersion = 1
 }
 
 /// Providers that support chunked, resumable uploads from a local file URL.

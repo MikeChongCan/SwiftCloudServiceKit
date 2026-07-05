@@ -10,6 +10,7 @@ Swift Package · iOS 17+ / tvOS 17+ / macOS 14+ · Depends on OAuthSwift
 - `CloudItem` is the universal file/folder model; providers parse service JSON into it via `cloudItemFromJSON(_:)`.
 - The library uses a native, modern `URLSession` async/await request engine (replacing `Just.swift`).
 - `CloudResumableUploading` + `CloudUploadSession` support pause/resume for Google Drive and OneDrive; chunk reads use `FileChunkReader` (`Task { @concurrent in ... }`) off the main actor.
+- `CloudBackgroundUploading` (0.2.0) exposes pure chunk request builders and response parsers for host-owned background `URLSession` uploads — see `Docs/BackgroundUploadSupport.md`.
 - Completion handlers and async provider calls run on the **main thread** (via `@MainActor` isolation).
 
 ## Gotchas

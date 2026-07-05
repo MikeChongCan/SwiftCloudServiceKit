@@ -12,7 +12,7 @@ Add `CloudServiceKit` to your `Package.swift` dependencies:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.1.1")
+    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.2.0")
 ]
 ```
 
@@ -86,6 +86,23 @@ let remoteItem = try await googleProvider.finishUpload(session: session)
 ```
 
 Chunk reads run off the main actor; provider APIs remain `@MainActor`.
+
+### Background `URLSession` (0.2.0+)
+
+The host app owns the background `URLSession` and delegate. CloudServiceKit builds requests and parses responses:
+
+```swift
+// After relaunch — resync offset from server
+let status = try await CloudBackgroundUpload.queryUploadStatus(session: persistedSession)
+// Build next PUT (no body — use uploadTask(with:fromFile:))
+let plan = try CloudBackgroundUpload.chunkUploadPlan(for: persistedSession, preferredLength: nil)
+try await FileRegionWriter.writeRegion(of: sourceURL, range: plan.fileRange, to: tempFileURL)
+// Enqueue background upload with plan.request + tempFileURL
+// In URLSession delegate:
+let outcome = CloudBackgroundUpload.parseChunkResponse(httpResponse, data: data, for: persistedSession)
+```
+
+See `Docs/BackgroundUploadSupport.md` for Google (whole-remainder PUT) vs OneDrive (≤60 MiB, 320 KiB-aligned) rules.
 
 ### Injectable `URLSession` (tests / custom config)
 
