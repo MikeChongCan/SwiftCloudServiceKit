@@ -52,7 +52,6 @@ final class DirectCallbackASWebAuthenticationURLHandler: OAuthSwiftURLHandlerTyp
         webAuthSession?.presentationContextProvider = presentationContextProvider
         webAuthSession?.prefersEphemeralWebBrowserSession = prefersEphemeralWebBrowserSession
         _ = webAuthSession?.start()
-        OAuthSwift.log?.trace("DirectCallbackASWebAuthenticationURLHandler started session")
     }
 }
 
