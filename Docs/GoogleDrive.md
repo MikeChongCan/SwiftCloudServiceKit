@@ -56,6 +56,13 @@ let connector = GoogleDriveConnector(
 try await connector.connectWithASWebAuthenticationSession(viewController: self)
 ```
 
+CloudServiceKit **0.2.2+** completes sign-in without extra app URL wiring. If you use the Safari-based `connect(viewController:)` API instead, or need belt-and-suspenders handling, forward OAuth callbacks:
+
+```swift
+// SwiftUI .onOpenURL or AppDelegate application(_:open:options:)
+CloudOAuthURLHandler.handle(url)
+```
+
 ## 4. Large file uploads
 
 For clips or other multi-GB files, use **`uploadFile(_:to:progressHandler:)`** or the resumable API — never `uploadData`, which loads the entire file into memory.

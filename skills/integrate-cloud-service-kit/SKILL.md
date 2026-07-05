@@ -12,12 +12,69 @@ Add `CloudServiceKit` to your `Package.swift` dependencies:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.2.1")
+    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.2.2")
 ]
 ```
 
 Or add it directly in Xcode's Package Dependencies settings using the URL:
 `https://github.com/MikeChongCan/SwiftCloudServiceKit.git`
+
+---
+
+## OAuth sign-in (`connectWithASWebAuthenticationSession`)
+
+**0.2.2+** — CloudServiceKit delivers the OAuth callback directly to OAuthSwift. You do **not** need extra URL wiring for the default ASWeb authentication flow.
+
+### Required app setup
+
+1. Register the redirect URI with your OAuth provider (Google reversed client ID, OneDrive custom scheme, etc.).
+2. Add matching **URL schemes** in the app target `Info.plist` / Xcode **URL Types**.
+3. Call `connectWithASWebAuthenticationSession` from a visible view controller (sheet or full screen).
+
+```swift
+import CloudServiceKit
+
+let connector = GoogleDriveConnector(
+    appId: clientID,
+    appSecret: "", // iOS public client — empty is OK
+    callbackUrl: "com.googleusercontent.apps.YOUR_ID:/oauth2redirect"
+)
+
+let tokens = try await connector.connectWithASWebAuthenticationSession(viewController: self)
+```
+
+### Optional fallback URL forwarding
+
+Still forward OAuth callbacks if you use **`connect(viewController:)`** (Safari in-app handler) or a custom URL handler:
+
+**SwiftUI**
+
+```swift
+.onOpenURL { url in
+    if CloudOAuthURLHandler.handle(url) { return }
+    // other deep links…
+}
+```
+
+**UIKit `AppDelegate`**
+
+```swift
+func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+    CloudOAuthURLHandler.handle(url)
+}
+```
+
+Without this fallback, Safari-based OAuth can complete in the browser but leave your app stuck on “Signing in…”.
+
+### Common failures
+
+| Symptom | Likely cause |
+|--------|----------------|
+| Stuck on “Signing in…” after browser closes | Missing `CloudOAuthURLHandler.handle` when using Safari handler, or redirect URI / URL scheme mismatch |
+| `redirect_uri_mismatch` | Redirect in code ≠ provider console registration |
+| User dismissed sheet | `OAuthSwiftError.cancelled` — treat as cancel, not a hard error |
+
+See `Docs/GoogleDrive.md` and `Docs/OneDrive.md` for provider-specific redirect URIs.
 
 ---
 

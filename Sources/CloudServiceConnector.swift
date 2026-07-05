@@ -143,9 +143,9 @@ public class CloudServiceConnector: CloudServiceOAuth, CloudServiceProviderDeleg
         if let range = callbackUrl.range(of: ":/") {
             callbackUrlScheme = String(callbackUrl[..<range.lowerBound])
         }
-        oauth.authorizeURLHandler = ASWebAuthenticationURLHandler(callbackUrlScheme: callbackUrlScheme,
-                                                                  presentationContextProvider: viewController,
-                                                                  prefersEphemeralWebBrowserSession: prefersEphemeralWebBrowserSession)
+        oauth.authorizeURLHandler = DirectCallbackASWebAuthenticationURLHandler(callbackUrlScheme: callbackUrlScheme,
+                                                                              presentationContextProvider: viewController,
+                                                                              prefersEphemeralWebBrowserSession: prefersEphemeralWebBrowserSession)
         #endif
         self.oauth = oauth
         _ = oauth.authorize(withCallbackURL: URL(string: callbackUrl), scope: scope, state: state, parameters: authorizeParameters, completionHandler: { result in

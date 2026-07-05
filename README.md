@@ -28,7 +28,7 @@ Once you have your Swift package set up, adding CloudServiceKit as a dependency 
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.2.1")
+    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.2.2")
 ]
 ```
 
@@ -63,12 +63,30 @@ let connector = DropboxConnector(appId: "your_app_id", appSecret: "your_app_secr
 
 ### 2. Handle the openURL
 
-Since CloudServiceKit depends on [OAuthSwift](https://github.com/OAuthSwift/OAuthSwift). You app should handle openURL. Assuming your `redirectUrl` is like `filebox_oauth://oauth-callback`. 
+CloudServiceKit **0.2.2+** uses `DirectCallbackASWebAuthenticationURLHandler` for `connectWithASWebAuthenticationSession`, so the OAuth callback is delivered to OAuthSwift automatically — **no host wiring required** for that API.
 
-* On iOS implement UIApplicationDelegate method
+If you use the Safari-based `connect(viewController:)` API, or want a fallback for deep links, forward OAuth URLs:
 
 ```swift
-func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey  : Any] = [:]) -> Bool {
+import CloudServiceKit
+
+// SwiftUI
+.onOpenURL { url in
+    if CloudOAuthURLHandler.handle(url) { return }
+}
+
+// UIKit AppDelegate
+func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+    CloudOAuthURLHandler.handle(url)
+}
+```
+
+Legacy manual wiring (still valid for Safari handler):
+
+```swift
+import OAuthSwift
+
+func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
   if url.host == "oauth-callback" {
     OAuthSwift.handle(url: url)
   }
@@ -76,24 +94,13 @@ func application(_ app: UIApplication, open url: URL, options: [UIApplication.Op
 }
 ```
 
-* On iOS 13, UIKit will notify UISceneDelegate instead of UIApplicationDelegate. Implement UISceneDelegate method
+* On iOS 13+, UIKit may deliver URLs to `UISceneDelegate` instead:
 
 ```swift
-import OAuthSwift
-
-class SceneDelegate: UIResponder, UIWindowSceneDelegate {
-
-    // ...
-
-    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
-        
-        guard let url = URLContexts.first?.url else {
-            return
-        }
-        if url.host == "oauth-callback" {
-            OAuthSwift.handle(url: url)
-        }    
-    }
+func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+    guard let url = URLContexts.first?.url else { return }
+    CloudOAuthURLHandler.handle(url)
+}
 ```
 
 ### 3. Connect to service
