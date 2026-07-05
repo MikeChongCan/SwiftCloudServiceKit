@@ -26,9 +26,9 @@ The Swift Package Manager is a tool for automating the distribution of Swift cod
 
 Once you have your Swift package set up, adding CloudServiceKit as a dependency is as easy as adding it to the dependencies value of your Package.swift.
 
-```bash
+```swift
 dependencies: [
-    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.2.0")
+    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.2.1")
 ]
 ```
 
@@ -44,45 +44,6 @@ Use instead:
 File chunk reads run off the main actor via `FileChunkReader` so UI stays responsive during uploads.
 
 For uploads that continue while the app is suspended, use **`CloudBackgroundUploading`** (0.2.0): `chunkUploadPlan`, `parseChunkResponse`, and `queryUploadStatus` build pure requests and parse delegate callbacks for a host-owned background `URLSession`. See [Docs/BackgroundUploadSupport.md](Docs/BackgroundUploadSupport.md).
-
-## Quick Start
-
-You can explore `CloudServiceKit` by running example. But first you should configure app information that cloud drive services provides, you can fulfill information in `CloudConfiguration.swift`.
-
-```swift
-extension CloudConfiguration {
-    
-    static var aliyun: CloudConfiguration? {
-        // fulfill your aliyun app info
-        return nil
-    }
-
-    static var baidu: CloudConfiguration? {
-        // fulfill your baidu app info
-        return nil
-    }
-    
-    static var box: CloudConfiguration? {
-        return nil
-    }
-    
-    static var dropbox: CloudConfiguration? {
-        return nil
-    }
-    
-    static var googleDrive: CloudConfiguration? {
-        return nil
-    }
-    
-    static var oneDrive: CloudConfiguration? {
-        return nil
-    }
-    
-    static var pCloud: CloudConfiguration? {
-        return nil
-    }
-}
-```
 
 ## Get Started
 
@@ -144,8 +105,14 @@ connector.connect(viewController: self) { result in
         let credential = URLCredential(user: "user", password: token.credential.oauthToken, persistence: .permanent)
         // You can save token for next use.
         let provider = DropboxServiceProvider(credential: credential)
-        let vc = DriveBrowserViewController(provider: provider, directory: provider.rootItem)
-        self.navigationController?.pushViewController(vc, animated: true)
+        provider.contentsOfDirectory(provider.rootItem) { result in
+            switch result {
+            case .success(let items):
+                print(items)
+            case .failure(let error):
+                print(error)
+            }
+        }
     case .failure(let error):
         print(error)
     }
