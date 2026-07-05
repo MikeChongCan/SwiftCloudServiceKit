@@ -263,12 +263,15 @@ extension OneDriveServiceProvider: CloudResumableUploading {
             throw CloudServiceError.uploadFileNotExist
         }
         
-        let escapedName = filename.urlEncoded
-        let url = itemURL(for: directory).appendingPathComponent("children/\(escapedName)/createUploadSession")
+        let url = OneDriveUploadURLs.createUploadSession(
+            routePrefix: route.prefix,
+            parentItemID: directory.id,
+            filename: filename
+        )
+        // Name is encoded in the URL path; duplicate `name` in the body can trigger invalidRequest.
         let body: [String: Any] = [
             "item": [
                 "@microsoft.graph.conflictBehavior": "rename",
-                "name": filename,
             ],
         ]
         let response = try await post(url: url, json: body)

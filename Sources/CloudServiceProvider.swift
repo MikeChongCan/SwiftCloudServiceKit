@@ -296,6 +296,11 @@ extension CloudServiceProvider {
 }
 
 // MARK: - Helper
+private enum CloudHTTPTransport {
+    /// Small JSON/control POST bodies must use `data(for:)` — see `request(_:url:...)`.
+    static let uploadTaskBodyThreshold = 256 * 1024
+}
+
 extension CloudServiceProvider {
     
     public func fileSize(of fileURL: URL) -> Int64? {
@@ -658,12 +663,19 @@ extension CloudServiceProvider {
         
         let taskDelegate = progressHandler.map { HTTPTaskDelegate(progressHandler: $0) }
         let requestSession = self.session
+        let shouldUseUploadTask = {
+            guard let bodyData, progressHandler != nil else { return false }
+            guard method == .post || method == .put || method == .patch else { return false }
+            // URLSession.upload(for:from:) injects Upload-Complete / Upload-Draft-Interop-Version
+            // headers that break Graph createUploadSession and other small JSON POSTs.
+            return bodyData.count > CloudHTTPTransport.uploadTaskBodyThreshold
+        }()
         
         Task {
             do {
                 let data: Data
                 let response: URLResponse
-                if let bodyData = bodyData, (method == .post || method == .put || method == .patch) {
+                if shouldUseUploadTask, let bodyData {
                     (data, response) = try await requestSession.upload(for: request, from: bodyData, delegate: taskDelegate)
                 } else {
                     (data, response) = try await requestSession.data(for: request, delegate: taskDelegate)
