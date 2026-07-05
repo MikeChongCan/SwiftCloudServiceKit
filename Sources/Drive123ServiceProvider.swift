@@ -28,6 +28,8 @@ public final class Drive123ServiceProvider: CloudServiceProvider {
     
     public var apiURL = URL(string: "https://open-api.123pan.com")!
     
+    public let session: URLSession
+    
     private var headers: [String: String] {
         return ["Platform": "open_platform"]
     }
@@ -41,6 +43,12 @@ public final class Drive123ServiceProvider: CloudServiceProvider {
     
     public required init(credential: URLCredential?) {
         self.credential = credential
+        self.session = .shared
+    }
+    
+    public init(credential: URLCredential?, session: URLSession) {
+        self.credential = credential
+        self.session = session
     }
     
     public func attributesOfItem(_ item: CloudItem) async throws -> CloudItem {

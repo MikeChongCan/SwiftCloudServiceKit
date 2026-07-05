@@ -27,8 +27,16 @@ public final class Drive115ServiceProvider: CloudServiceProvider {
     
     private let ossClient = AliyunOSSClient()
     
+    public let session: URLSession
+    
     public required init(credential: URLCredential?) {
         self.credential = credential
+        self.session = .shared
+    }
+    
+    public init(credential: URLCredential?, session: URLSession) {
+        self.credential = credential
+        self.session = session
     }
     
     public func attributesOfItem(_ item: CloudItem) async throws -> CloudItem {

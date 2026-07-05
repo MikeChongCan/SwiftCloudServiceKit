@@ -29,8 +29,16 @@ public final class PCloudServiceProvider: CloudServiceProvider {
     
     private var apiServer: String?
     
+    public let session: URLSession
+    
     required public init(credential: URLCredential?) {
         self.credential = credential
+        self.session = .shared
+    }
+    
+    public init(credential: URLCredential?, session: URLSession) {
+        self.credential = credential
+        self.session = session
     }
     
     private func getApiServer() async throws -> String {

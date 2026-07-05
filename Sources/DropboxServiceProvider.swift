@@ -30,10 +30,18 @@ public final class DropboxServiceProvider: CloudServiceProvider {
     /// The refresh access token handler. Used to refresh access token when the token expires.
     public var refreshAccessTokenHandler: CloudRefreshAccessTokenHandler?
     
+    public let session: URLSession
+    
     /// Create an instance of DropboxServiceProvider with URLCredential
     /// - Parameter credential: The URLCredential.
     required public init(credential: URLCredential?) {
         self.credential = credential
+        self.session = .shared
+    }
+    
+    public init(credential: URLCredential?, session: URLSession) {
+        self.credential = credential
+        self.session = session
     }
     
     /// Load the contents at directory.
@@ -260,7 +268,7 @@ public final class DropboxServiceProvider: CloudServiceProvider {
         let response = try await post(url: url, headers: headers)
         if let json = response.response?.json as? [String: Any],
            let sessionId = json["session_id"] as? String {
-            return try await appendUploadSession(fileURL: fileURL, to: directory, totalSize: totalSize, offset: 0, sessionId: sessionId, progressHandler: progressHandler)
+            return try await appendUploadSession(fileURL: fileURL, to: directory, totalSize: totalSize, sessionId: sessionId, progressHandler: progressHandler)
         } else {
             throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult())
         }
@@ -279,43 +287,41 @@ extension DropboxServiceProvider {
 // MARK: - Chunk upload
 extension DropboxServiceProvider {
     
-    private func appendUploadSession(fileURL: URL, to directory: CloudItem, totalSize: Int64, offset: Int64, sessionId: String, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
-        
-        //upload_session/append:2 call must be multiple of 4194304 bytes (except for last
+    private func appendUploadSession(fileURL: URL, to directory: CloudItem, totalSize: Int64, sessionId: String, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
+        // upload_session/append:2 call must be multiple of 4194304 bytes (except for last)
         let chunkSize: Int64 = 4194304 * 2
-        let length = min(chunkSize, totalSize - offset)
-        let handle = try FileHandle(forReadingFrom: fileURL)
-        try handle.seek(toOffset: UInt64(offset))
-        let data = handle.readData(ofLength: Int(length))
-        try handle.close()
-        
-        let url = contentURL.appendingPathComponent("files/upload_session/append_v2")
-        
-        var args: [String: Any] = [:]
-        args["close"] = length < chunkSize
-        args["cursor"] = [
-            "session_id": sessionId,
-            "offset": offset
-        ]
-        
-        let headers = [
-            "Dropbox-API-Arg": dropboxAPIArg(from: args),
-            "Content-Type": "application/octet-stream"
-        ]
-        
+        var offset: Int64 = 0
         let progressReport = Progress(totalUnitCount: totalSize)
-        let response = try await post(url: url, headers: headers, requestBody: data, progressHandler: { progress in
-            progressReport.completedUnitCount = offset + Int64(Float(length) * progress.percent)
-            progressHandler?(progressReport)
-        })
         
-        let nextOffset = offset + length
-        if nextOffset >= totalSize {
-            let path = [directory.path, fileURL.lastPathComponent].joined(separator: "/")
-            return try await finishSession(sessionId, path: path, offset: totalSize)
-        } else {
-            return try await appendUploadSession(fileURL: fileURL, to: directory, totalSize: totalSize, offset: nextOffset, sessionId: sessionId, progressHandler: progressHandler)
+        while offset < totalSize {
+            let length = min(chunkSize, totalSize - offset)
+            let chunkOffset = offset
+            let data = try await FileChunkReader.readChunk(from: fileURL, offset: chunkOffset, length: Int(length))
+            
+            let url = contentURL.appendingPathComponent("files/upload_session/append_v2")
+            
+            var args: [String: Any] = [:]
+            args["close"] = chunkOffset + length >= totalSize
+            args["cursor"] = [
+                "session_id": sessionId,
+                "offset": chunkOffset
+            ]
+            
+            let headers = [
+                "Dropbox-API-Arg": dropboxAPIArg(from: args),
+                "Content-Type": "application/octet-stream"
+            ]
+            
+            _ = try await post(url: url, headers: headers, requestBody: data, progressHandler: { progress in
+                progressReport.completedUnitCount = chunkOffset + Int64(Float(length) * progress.percent)
+                progressHandler?(progressReport)
+            })
+            
+            offset = chunkOffset + length
         }
+        
+        let path = [directory.path, fileURL.lastPathComponent].joined(separator: "/")
+        return try await finishSession(sessionId, path: path, offset: totalSize)
     }
     
     private func finishSession(_ sessionId: String, path: String, offset: Int64) async throws -> CloudResponse<HTTPResult, Error> {

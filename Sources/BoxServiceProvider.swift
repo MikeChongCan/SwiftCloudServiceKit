@@ -34,8 +34,16 @@ public final class BoxServiceProvider: CloudServiceProvider {
     /// The refresh access token handler. Used to refresh access token when the token expires.
     public var refreshAccessTokenHandler: CloudRefreshAccessTokenHandler?
     
+    public let session: URLSession
+    
     required public init(credential: URLCredential?) {
         self.credential = credential
+        self.session = .shared
+    }
+    
+    public init(credential: URLCredential?, session: URLSession) {
+        self.credential = credential
+        self.session = session
     }
     
     /// Get attributes of cloud item.
@@ -232,7 +240,7 @@ public final class BoxServiceProvider: CloudServiceProvider {
             let response = try await post(url: url, json: json)
             if let content = response.response?.content,
                let session = try? JSONDecoder().decode(UploadSession.self, from: content) {
-                return try await uploadPart(session: session, fileURL: fileURL, totalSize: totalSize, offset: 0, progressHandler: progressHandler)
+                return try await uploadAllParts(session: session, fileURL: fileURL, totalSize: totalSize, progressHandler: progressHandler)
             } else {
                 throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult())
             }
@@ -246,40 +254,39 @@ public final class BoxServiceProvider: CloudServiceProvider {
 // MARK: - Chunk Upload
 extension BoxServiceProvider {
     
-    private func uploadPart(session: UploadSession, fileURL: URL, totalSize: Int64, offset: Int64, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
-        let length = min(Int64(session.partSize), totalSize - offset)
-        let handle = try FileHandle(forReadingFrom: fileURL)
-        try handle.seek(toOffset: UInt64(offset))
-        let data = handle.readData(ofLength: Int(length))
-        let sha1 = Insecure.SHA1.hash(data: data).toBase64()
-        try handle.close()
-        
-        let url = uploadURL
-            .appendingPathComponent("files/upload_sessions")
-            .appendingPathComponent(session.id)
-        var headers: [String: String] = [:]
-        headers["Content-Range"] = String(format: "bytes %ld-%ld/%ld", offset, offset + length - 1, totalSize)
-        headers["Digest"] = "sha=\(sha1)"
-        headers["Content-Type"] = "application/octet-stream"
-        
+    private func uploadAllParts(session: UploadSession, fileURL: URL, totalSize: Int64, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
+        var offset: Int64 = 0
         let progressReport = Progress(totalUnitCount: totalSize)
-        let response = try await put(url: url, headers: headers, requestBody: data, progressHandler: { progress in
-            progressReport.completedUnitCount = offset + Int64(Float(length) * progress.percent)
-            progressHandler?(progressReport)
-        })
         
-        if let content = response.response?.content,
-           let part = (try? JSONDecoder().decode(UploadPart.self, from: content))?.part {
-            session.parts.append(part)
-            let nextOffset = part.offset + part.size
-            if nextOffset >= totalSize {
-                return try await commitUploadSession(session, fileURL: fileURL)
+        while offset < totalSize {
+            let length = min(Int64(session.partSize), totalSize - offset)
+            let chunkOffset = offset
+            let data = try await FileChunkReader.readChunk(from: fileURL, offset: chunkOffset, length: Int(length))
+            let sha1 = Insecure.SHA1.hash(data: data).toBase64()
+            
+            let url = uploadURL
+                .appendingPathComponent("files/upload_sessions")
+                .appendingPathComponent(session.id)
+            var headers: [String: String] = [:]
+            headers["Content-Range"] = String(format: "bytes %ld-%ld/%ld", chunkOffset, chunkOffset + length - 1, totalSize)
+            headers["Digest"] = "sha=\(sha1)"
+            headers["Content-Type"] = "application/octet-stream"
+            
+            let response = try await put(url: url, headers: headers, requestBody: data, progressHandler: { progress in
+                progressReport.completedUnitCount = chunkOffset + Int64(Float(length) * progress.percent)
+                progressHandler?(progressReport)
+            })
+            
+            if let content = response.response?.content,
+               let part = (try? JSONDecoder().decode(UploadPart.self, from: content))?.part {
+                session.parts.append(part)
+                offset = part.offset + part.size
             } else {
-                return try await uploadPart(session: session, fileURL: fileURL, totalSize: totalSize, offset: nextOffset, progressHandler: progressHandler)
+                throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult())
             }
-        } else {
-            throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult())
         }
+        
+        return try await commitUploadSession(session, fileURL: fileURL)
     }
     
     private func commitUploadSession(_ session: UploadSession, fileURL: URL) async throws -> CloudResponse<HTTPResult, Error> {

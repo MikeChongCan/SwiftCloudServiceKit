@@ -202,7 +202,7 @@ extension CloudServiceConnector {
 }
 
 // MARK: - AliyunDriveConnector
-public class AliyunDriveConnector: CloudServiceConnector {
+public class AliyunDriveConnector: CloudServiceConnector, @unchecked Sendable {
     
     public override var authorizeUrl: String {
         "https://open.aliyundrive.com/oauth/authorize"
@@ -219,7 +219,7 @@ public class AliyunDriveConnector: CloudServiceConnector {
 }
 
 // MARK: - BaiduPanConnector
-public class BaiduPanConnector: CloudServiceConnector {
+public class BaiduPanConnector: CloudServiceConnector, @unchecked Sendable {
     
     /// The OAuth2 url, which is `https://openapi.baidu.com/oauth/2.0/authorize`.
     public override var authorizeUrl: String {
@@ -244,7 +244,7 @@ public class BaiduPanConnector: CloudServiceConnector {
 }
 
 // MARK: - BoxConnector
-public class BoxConnector: CloudServiceConnector {
+public class BoxConnector: CloudServiceConnector, @unchecked Sendable {
     
     public override var authorizeUrl: String {
         return "https://account.box.com/api/oauth2/authorize"
@@ -262,7 +262,7 @@ public class BoxConnector: CloudServiceConnector {
 }
 
 // MARK: - DropboxConnector
-public class DropboxConnector: CloudServiceConnector {
+public class DropboxConnector: CloudServiceConnector, @unchecked Sendable {
     
     public override var authorizeUrl: String {
         return "https://www.dropbox.com/oauth2/authorize?token_access_type=offline"
@@ -274,7 +274,7 @@ public class DropboxConnector: CloudServiceConnector {
 }
 
 // MARK: - GoogleDriveConnector
-public class GoogleDriveConnector: CloudServiceConnector {
+public class GoogleDriveConnector: CloudServiceConnector, @unchecked Sendable {
     
     public override var authorizeUrl: String {
         return "https://accounts.google.com/o/oauth2/auth"
@@ -293,7 +293,7 @@ public class GoogleDriveConnector: CloudServiceConnector {
 
 
 // MARK: - OneDriveConnector
-public class OneDriveConnector: CloudServiceConnector {
+public class OneDriveConnector: CloudServiceConnector, @unchecked Sendable {
 
     public override var authorizeUrl: String {
         return "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
@@ -312,7 +312,7 @@ public class OneDriveConnector: CloudServiceConnector {
 }
 
 // MARK: - PCloudConnector
-public class PCloudConnector: CloudServiceConnector {
+public class PCloudConnector: CloudServiceConnector, @unchecked Sendable {
     
     public override var authorizeUrl: String {
         return "https://my.pcloud.com/oauth2/authorize"
@@ -329,7 +329,7 @@ public class PCloudConnector: CloudServiceConnector {
 }
 
 // MARK: - Drive115Connector
-public class Drive115Connector: CloudServiceConnector {
+public class Drive115Connector: CloudServiceConnector, @unchecked Sendable {
     
     public override var authorizeUrl: String {
         return ""
@@ -373,9 +373,9 @@ public class Drive115Connector: CloudServiceConnector {
     }
     
     public func fetchAuthQRCode() async throws -> QRCode {
-        let codeVerifier = try generateCodeVerifier(count: 32)
+        let codeVerifier = try OAuthPKCE.generateCodeVerifier(byteCount: 32)
         self.codeVerifier = codeVerifier
-        let codeChallenge = codeChallenge(fromVerifier: codeVerifier)
+        let codeChallenge = OAuthPKCE.codeChallenge(fromVerifier: codeVerifier)
         return try await generateDeviceCode(appId: appId, codeChallenge: codeChallenge)
     }
     public func generateDeviceCode(appId: String, codeChallenge: String) async throws -> QRCode {
@@ -528,24 +528,25 @@ public class Drive115Connector: CloudServiceConnector {
     }
 }
 
-extension Drive115Connector {
-    private func base64URLEncode(_ data: Data) -> String {
-        return data.base64EncodedString()
+/// PKCE helpers shared by OAuth connectors (RFC 7636).
+enum OAuthPKCE {
+    static func base64URLEncode(_ data: Data) -> String {
+        data.base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
     }
 
-    private func generateCodeVerifier(count: Int) throws -> String {
-        var octets = [UInt8](repeating: 0, count: count)
+    static func generateCodeVerifier(byteCount: Int) throws -> String {
+        var octets = [UInt8](repeating: 0, count: byteCount)
         let status = SecRandomCopyBytes(kSecRandomDefault, octets.count, &octets)
         guard status == errSecSuccess else {
             throw CloudServiceError.serviceError(Int(status), "SecRandomCopyBytes failed")
         }
         return base64URLEncode(Data(octets))
     }
-    
-    private func codeChallenge(fromVerifier verifier: String) -> String {
+
+    static func codeChallenge(fromVerifier verifier: String) -> String {
         let verifierData = verifier.data(using: .ascii)!
         let challengeHashed = SHA256.hash(data: verifierData)
         return base64URLEncode(Data(challengeHashed))
@@ -554,7 +555,7 @@ extension Drive115Connector {
 
 // MARK: - Drive123Connector
 
-public class Drive123Connector: CloudServiceConnector {
+public class Drive123Connector: CloudServiceConnector, @unchecked Sendable {
     
     public override var authorizeUrl: String {
         "https://www.123pan.com/auth"
@@ -574,7 +575,7 @@ public class Drive123Connector: CloudServiceConnector {
 
 // MARK: - WebDAVConnector
 
-public class WebDAVConnector: CloudServiceConnector {
+public class WebDAVConnector: CloudServiceConnector, @unchecked Sendable {
     
     public override var authorizeUrl: String {
         return ""

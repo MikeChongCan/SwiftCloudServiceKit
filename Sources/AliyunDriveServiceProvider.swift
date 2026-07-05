@@ -29,8 +29,16 @@ public final class AliyunDriveServiceProvider: CloudServiceProvider {
     
     public var apiURL = URL(string: "https://openapi.alipan.com")!
     
+    public let session: URLSession
+    
     public required init(credential: URLCredential?) {
         self.credential = credential
+        self.session = .shared
+    }
+    
+    public init(credential: URLCredential?, session: URLSession) {
+        self.credential = credential
+        self.session = session
     }
     
     /// Get attributes of cloud item.
@@ -361,37 +369,32 @@ extension AliyunDriveServiceProvider {
     private func performUpload(result: HTTPResult, fileURL: URL, size: Int64, directory: CloudItem, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
         let content = result.content ?? Data()
         let session = try JSONDecoder().decode(AliyunUploadSession.self, from: content)
-        if let part = session.partInfoList?.first {
-            return try await chunkUpload(session: session, part: part, fileURL: fileURL, size: size, progressHandler: progressHandler)
+        if let partList = session.partInfoList, !partList.isEmpty {
+            return try await uploadAllParts(session: session, fileURL: fileURL, size: size, progressHandler: progressHandler)
         }
         throw CloudServiceError.responseDecodeError(result)
     }
 
-    private func chunkUpload(session: AliyunUploadSession, part: AliyunPartInfo, fileURL: URL, size: Int64, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
-        let offset: Int64 = Int64(part.partNumber - 1) * chunkSize
-        let length = min(chunkSize, size - offset)
-        let fileHandle = try FileHandle(forReadingFrom: fileURL)
-        try fileHandle.seek(toOffset: UInt64(offset))
-        let data = fileHandle.readData(ofLength: Int(length))
-        try fileHandle.close()
-                    
-        let headers = ["Content-Type": ""]
-        
-        let progressReport = Progress(totalUnitCount: size)
-        _ = try await put(url: part.uploadUrl, headers: headers, requestBody: data, progressHandler: { progress in
-            progressReport.completedUnitCount = offset + Int64(Float(length) * progress.percent)
-            progressHandler?(progressReport)
-        })
-        
-        guard let partList = session.partInfoList else {
+    private func uploadAllParts(session: AliyunUploadSession, fileURL: URL, size: Int64, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
+        guard let partList = session.partInfoList, !partList.isEmpty else {
             throw CloudServiceError.unsupported
         }
-        let index = partList.firstIndex(where: { $0.partNumber == part.partNumber }) ?? 0
-        if index == partList.count - 1 {
-            return try await complete(session)
-        } else {
-            return try await chunkUpload(session: session, part: partList[index + 1], fileURL: fileURL, size: size, progressHandler: progressHandler)
+        
+        let progressReport = Progress(totalUnitCount: size)
+        for part in partList {
+            let offset = Int64(part.partNumber - 1) * chunkSize
+            let length = min(chunkSize, size - offset)
+            let chunkOffset = offset
+            let data = try await FileChunkReader.readChunk(from: fileURL, offset: chunkOffset, length: Int(length))
+            
+            let headers = ["Content-Type": ""]
+            _ = try await put(url: part.uploadUrl, headers: headers, requestBody: data, progressHandler: { progress in
+                progressReport.completedUnitCount = chunkOffset + Int64(Float(length) * progress.percent)
+                progressHandler?(progressReport)
+            })
         }
+        
+        return try await complete(session)
     }
     
     private func complete(_ session: AliyunUploadSession) async throws -> CloudResponse<HTTPResult, Error> {

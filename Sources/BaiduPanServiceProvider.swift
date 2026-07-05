@@ -35,8 +35,16 @@ public final class BaiduPanServiceProvider: CloudServiceProvider {
     
     private let apiURL = URL(string: "https://pan.baidu.com/rest/2.0")!
     
+    public let session: URLSession
+    
     required public init(credential: URLCredential?) {
         self.credential = credential
+        self.session = .shared
+    }
+    
+    public init(credential: URLCredential?, session: URLSession) {
+        self.credential = credential
+        self.session = session
     }
     
     /// Get attributes of cloud item.
@@ -280,7 +288,7 @@ public final class BaiduPanServiceProvider: CloudServiceProvider {
         if let json = response.response?.json as? [String: Any],
            let uploadId = json["uploadid"] as? String {
             let session = UploadSession(fileURL: fileURL, uploadId: uploadId, md5List: md5List, size: totalSize, finalPath: finalPath)
-            _ = try await chunkUpload(session: session, partseq: 0, progressHandler: progressHandler)
+            _ = try await uploadAllParts(session: session, progressHandler: progressHandler)
             let createResponse = try await createUploadFile(session: session)
             return try await moveItem(CloudItem(id: "", name: fileURL.lastPathComponent, path: finalPath, isDirectory: false), to: directory)
         } else {
@@ -310,38 +318,38 @@ extension BaiduPanServiceProvider {
         return list
     }
     
-    private func chunkUpload(session: UploadSession, partseq: Int, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
-        let offset = Int64(partseq) * chunkSize
-        let length = min(chunkSize, session.size - offset)
-        
-        let handle = try FileHandle(forReadingFrom: session.fileURL)
-        try handle.seek(toOffset: UInt64(offset))
-        let data = handle.readData(ofLength: Int(length))
-        try handle.close()
-        
-        let url = URL(string: "https://d.pcs.baidu.com/rest/2.0/pcs/file")!
-        let params: [String: Any] = [
-            "method": "upload",
-            "type": "tmpfile",
-            "path": session.finalPath,
-            "uploadid": session.uploadId,
-            "partseq": partseq
-        ]
-        
-        let file = HTTPFile.data(session.fileURL.lastPathComponent, data, "application/octet-stream")
-        
+    private func uploadAllParts(session: UploadSession, progressHandler: (@Sendable (Progress) -> Void)?) async throws -> CloudResponse<HTTPResult, Error> {
+        var partseq = 0
+        var lastResponse: CloudResponse<HTTPResult, Error>?
         let progressReport = Progress(totalUnitCount: session.size)
-        let response = try await post(url: url, params: params, files: ["file": file], progressHandler: { progress in
-            progressReport.completedUnitCount = offset + Int64(Float(length) * progress.percent)
-            progressHandler?(progressReport)
-        })
         
-        let nextPart = partseq + 1
-        if Int64(nextPart) * chunkSize >= session.size {
-            return response
-        } else {
-            return try await chunkUpload(session: session, partseq: nextPart, progressHandler: progressHandler)
+        while Int64(partseq) * chunkSize < session.size {
+            let offset = Int64(partseq) * chunkSize
+            let length = min(chunkSize, session.size - offset)
+            let chunkOffset = offset
+            let data = try await FileChunkReader.readChunk(from: session.fileURL, offset: chunkOffset, length: Int(length))
+            
+            let url = URL(string: "https://d.pcs.baidu.com/rest/2.0/pcs/file")!
+            let params: [String: Any] = [
+                "method": "upload",
+                "type": "tmpfile",
+                "path": session.finalPath,
+                "uploadid": session.uploadId,
+                "partseq": partseq
+            ]
+            
+            let file = HTTPFile.data(session.fileURL.lastPathComponent, data, "application/octet-stream")
+            
+            let response = try await post(url: url, params: params, files: ["file": file], progressHandler: { progress in
+                progressReport.completedUnitCount = chunkOffset + Int64(Float(length) * progress.percent)
+                progressHandler?(progressReport)
+            })
+            
+            lastResponse = response
+            partseq += 1
         }
+        
+        return lastResponse ?? CloudResponse(response: HTTPResult(), result: .success(HTTPResult()))
     }
     
     private func createUploadFile(session: UploadSession) async throws -> CloudResponse<HTTPResult, Error> {
