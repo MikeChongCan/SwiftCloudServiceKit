@@ -12,7 +12,7 @@ Add `CloudServiceKit` to your `Package.swift` dependencies:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.1.0")
+    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.1.1")
 ]
 ```
 
@@ -52,6 +52,50 @@ import CloudServiceKit
 
 let credential = URLCredential(user: "user_email", password: "oauth_access_token", persistence: .none)
 let provider = OneDriveServiceProvider(credential: credential)
+
+// Shared / team drives: pass an explicit route
+// let provider = OneDriveServiceProvider(credential: credential, route: .drive("DRIVE_ID"))
+```
+
+---
+
+## Large file uploads
+
+For clips or other multi-GB files, **do not** use `uploadData` — it loads the entire file into memory.
+
+Use `uploadFile` for one-shot chunked uploads from disk:
+
+```swift
+try await provider.uploadFile(localFileURL, to: parentDirectory) { progress in
+    print("Uploaded: \(Int(progress.fractionCompleted * 100))%")
+}
+```
+
+Google Drive and OneDrive also support pause/resume via `CloudResumableUploading`:
+
+```swift
+var session = try await googleProvider.beginUpload(
+    fileURL: localFileURL,
+    filename: "clip.mov",
+    to: parentDirectory,
+    contentType: "video/quicktime"
+)
+session = try await googleProvider.uploadAllChunks(session: &session) { progress in }
+let remoteItem = try await googleProvider.finishUpload(session: session)
+// Persist `session` as JSON between app launches to resume later
+```
+
+Chunk reads run off the main actor; provider APIs remain `@MainActor`.
+
+### Injectable `URLSession` (tests / custom config)
+
+Every provider accepts an optional session after the required credential initializer:
+
+```swift
+let provider = GoogleDriveServiceProvider(
+    credential: credential,
+    session: URLSession(configuration: .ephemeral)
+)
 ```
 
 ---
@@ -87,8 +131,9 @@ do {
 }
 ```
 
-### 3. Uploading Data with Progress
-Upload binary `Data` to a directory, tracking percentage progress:
+### 3. Uploading Data with Progress (small files only)
+
+Upload binary `Data` to a directory for **small files** (a few MB). For larger files, use `uploadFile` or `CloudResumableUploading` (see above).
 
 ```swift
 do {
