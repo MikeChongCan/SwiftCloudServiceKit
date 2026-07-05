@@ -296,9 +296,20 @@ extension CloudServiceProvider {
 }
 
 // MARK: - Helper
-private enum CloudHTTPTransport {
+enum CloudHTTPTransport {
     /// Small JSON/control POST bodies must use `data(for:)` — see `request(_:url:...)`.
     static let uploadTaskBodyThreshold = 256 * 1024
+
+    /// An upload task's request must not carry an in-request body: the bytes are supplied
+    /// exclusively through `upload(for:from:)`'s `from:` parameter. Foundation logs
+    /// "The request of a upload task should not contain a body or a body stream" otherwise,
+    /// and double-buffers the payload. Returns a copy of `request` with `httpBody` cleared.
+    static func uploadTaskRequest(strippingBodyFrom request: URLRequest) -> URLRequest {
+        var uploadRequest = request
+        uploadRequest.httpBody = nil
+        uploadRequest.httpBodyStream = nil
+        return uploadRequest
+    }
 }
 
 extension CloudServiceProvider {
@@ -676,7 +687,9 @@ extension CloudServiceProvider {
                 let data: Data
                 let response: URLResponse
                 if shouldUseUploadTask, let bodyData {
-                    (data, response) = try await requestSession.upload(for: request, from: bodyData, delegate: taskDelegate)
+                    // Upload tasks take their body from `from:`; the request must not carry one.
+                    let uploadRequest = CloudHTTPTransport.uploadTaskRequest(strippingBodyFrom: request)
+                    (data, response) = try await requestSession.upload(for: uploadRequest, from: bodyData, delegate: taskDelegate)
                 } else {
                     (data, response) = try await requestSession.data(for: request, delegate: taskDelegate)
                 }
