@@ -276,6 +276,23 @@ extension CloudServiceProvider {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
     }
+
+    /// OneDrive upload session URLs carry their own tempauth; Graph Bearer tokens must not be sent.
+    public func shouldApplyAuthorization(to url: URL) -> Bool {
+        let host = url.host?.lowercased() ?? ""
+        if host.contains("microsoftpersonalcontent.com") || host.contains("sharepoint.com") {
+            return false
+        }
+        let absolute = url.absoluteString
+        if absolute.localizedCaseInsensitiveContains("tempauth=") {
+            return false
+        }
+        if absolute.localizedCaseInsensitiveContains("uploadsession"),
+           !host.contains("graph.microsoft.com") {
+            return false
+        }
+        return true
+    }
 }
 
 // MARK: - Helper
@@ -592,7 +609,9 @@ extension CloudServiceProvider {
         request.httpMethod = method.rawValue
         
         var finalParams = params
-        applyAuthorization(to: &request, params: &finalParams, credential: credential)
+        if shouldApplyAuthorization(to: url) {
+            applyAuthorization(to: &request, params: &finalParams, credential: credential)
+        }
         
         var finalURL = url
         if !finalParams.isEmpty {
@@ -688,7 +707,9 @@ extension CloudServiceProvider {
         retryCount: Int = 0,
         completion: @escaping CloudCompletionHandler
     ) {
-        if isUnauthorizedResponse(response) && retryCount < 1 {
+        if isUnauthorizedResponse(response) && retryCount < 1,
+           let responseURL = response.response?.url ?? url.urlComponents?.url,
+           shouldApplyAuthorization(to: responseURL) {
             if let refreshAccessTokenHandler = refreshAccessTokenHandler {
                 Task {
                     do {

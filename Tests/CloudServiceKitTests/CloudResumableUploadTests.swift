@@ -45,8 +45,63 @@ final class CloudResumableUploadTests: XCTestCase {
                 ]
             ]
         ]
-        
+
         let item = OneDriveServiceProvider.cloudItemFromJSON(json)
         XCTAssertEqual(item?.fileHash, "abc123")
+    }
+
+    func test_OneDrive_shouldApplyAuthorization_skipsUploadHost() {
+        let provider = OneDriveServiceProvider(credential: nil)
+        let uploadURL = URL(string: "https://my.microsoftpersonalcontent.com/personal/user/_api/v2.0/drive/items/abc/uploadSession?tempauth=v1")!
+        XCTAssertFalse(provider.shouldApplyAuthorization(to: uploadURL))
+        let graphURL = URL(string: "https://graph.microsoft.com/v1.0/me/drive/root")!
+        XCTAssertTrue(provider.shouldApplyAuthorization(to: graphURL))
+    }
+
+    func test_OneDrive_parseChunkResponse_202_progresses() {
+        let json = #"{"nextExpectedRanges":["3932160-"]}"#.data(using: .utf8)!
+        let response = HTTPURLResponse(
+            url: URL(string: "https://upload.example/session")!,
+            statusCode: 202,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        let session = CloudUploadSession(
+            provider: "OneDrive",
+            fileURL: URL(fileURLWithPath: "/tmp/video.mov"),
+            filename: "video.mov",
+            directoryID: "dir",
+            totalBytes: 10_000_000,
+            sessionToken: "https://upload.example/session"
+        )
+        let outcome = OneDriveBackgroundUpload.parseChunkResponse(response, data: json, for: session)
+        if case .progressed(let uploaded) = outcome {
+            XCTAssertEqual(uploaded, 3_932_160)
+        } else {
+            XCTFail("Expected progressed, got \(outcome)")
+        }
+    }
+
+    func test_OneDrive_parseChunkResponse_409_isRetryable() {
+        let response = HTTPURLResponse(
+            url: URL(string: "https://upload.example/session")!,
+            statusCode: 409,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        let session = CloudUploadSession(
+            provider: "OneDrive",
+            fileURL: URL(fileURLWithPath: "/tmp/video.mov"),
+            filename: "video.mov",
+            directoryID: "dir",
+            totalBytes: 10_000_000,
+            sessionToken: "https://upload.example/session"
+        )
+        let outcome = OneDriveBackgroundUpload.parseChunkResponse(response, data: nil, for: session)
+        if case .retryable(let delay) = outcome {
+            XCTAssertEqual(delay, 2)
+        } else {
+            XCTFail("Expected retryable, got \(outcome)")
+        }
     }
 }

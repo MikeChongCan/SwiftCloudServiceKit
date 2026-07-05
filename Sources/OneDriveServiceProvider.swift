@@ -265,7 +265,13 @@ extension OneDriveServiceProvider: CloudResumableUploading {
         
         let escapedName = filename.urlEncoded
         let url = itemURL(for: directory).appendingPathComponent("children/\(escapedName)/createUploadSession")
-        let response = try await post(url: url)
+        let body: [String: Any] = [
+            "item": [
+                "@microsoft.graph.conflictBehavior": "rename",
+                "name": filename,
+            ],
+        ]
+        let response = try await post(url: url, json: body)
         guard let json = response.response?.json as? [String: Any],
               let uploadUrl = json["uploadUrl"] as? String else {
             throw CloudServiceError.responseDecodeError(response.response ?? HTTPResult())
@@ -293,30 +299,45 @@ extension OneDriveServiceProvider: CloudResumableUploading {
         progressHandler: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> CloudUploadSession {
         guard !session.isComplete else { return session }
-        
+
         let offset = session.uploadedBytes
         let length = min(uploadChunkSize, session.totalBytes - offset)
         let data = try await FileChunkReader.readChunk(from: session.fileURL, offset: offset, length: Int(length))
-        
-        var headers: [String: String] = [:]
-        headers["Content-Length"] = "\(length)"
-        headers["Content-Range"] = "bytes \(offset)-\(offset + length - 1)/\(session.totalBytes)"
-        headers["Content-Type"] = "application/octet-stream"
-        
-        let progressReport = Progress(totalUnitCount: session.totalBytes)
-        let response = try await put(url: session.sessionToken, headers: headers, requestBody: data, progressHandler: { progress in
-            progressReport.completedUnitCount = offset + Int64(Float(length) * progress.percent)
-            progressHandler?(progressReport)
-        })
-        
-        session.uploadedBytes = offset + length
-        
-        if session.isComplete,
-           let json = response.response?.json as? [String: Any],
-           let id = json["id"] as? String {
-            session.remoteFileID = id
+
+        guard let uploadURL = URL(string: session.sessionToken) else {
+            throw CloudServiceError.responseDecodeError(HTTPResult())
         }
-        
+
+        var request = URLRequest(url: uploadURL)
+        request.httpMethod = "PUT"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue("\(length)", forHTTPHeaderField: "Content-Length")
+        request.setValue("bytes \(offset)-\(offset + length - 1)/\(session.totalBytes)", forHTTPHeaderField: "Content-Range")
+
+        let progressReport = Progress(totalUnitCount: session.totalBytes)
+        let (responseData, urlResponse) = try await self.session.upload(for: request, from: data)
+        progressReport.completedUnitCount = offset + length
+        progressHandler?(progressReport)
+
+        guard let httpResponse = urlResponse as? HTTPURLResponse else {
+            throw CloudServiceError.serviceError(-1, "Invalid HTTP response")
+        }
+
+        let outcome = OneDriveBackgroundUpload.parseChunkResponse(httpResponse, data: responseData, for: session)
+        switch outcome {
+        case .progressed(let uploadedBytes):
+            session.uploadedBytes = uploadedBytes
+        case .completed(let remoteFileID):
+            session.uploadedBytes = session.totalBytes
+            session.remoteFileID = remoteFileID
+        case .sessionExpired:
+            throw CloudServiceError.serviceError(410, "Upload session expired")
+        case .retryable(let afterSeconds):
+            throw CloudServiceError.serviceError(429, "Upload retry needed after \(Int(afterSeconds ?? 2))s")
+        case .terminal(let error):
+            throw error
+        }
+
         return session
     }
     
@@ -333,27 +354,26 @@ extension OneDriveServiceProvider: CloudResumableUploading {
     ) async throws -> CloudResponse<HTTPResult, Error> {
         var lastResponse: CloudResponse<HTTPResult, Error>?
         while !session.isComplete {
-            let offset = session.uploadedBytes
-            let length = min(uploadChunkSize, session.totalBytes - offset)
-            let data = try await FileChunkReader.readChunk(from: session.fileURL, offset: offset, length: Int(length))
-            
-            var headers: [String: String] = [:]
-            headers["Content-Length"] = "\(length)"
-            headers["Content-Range"] = "bytes \(offset)-\(offset + length - 1)/\(session.totalBytes)"
-            headers["Content-Type"] = "application/octet-stream"
-            
-            let progressReport = Progress(totalUnitCount: session.totalBytes)
-            let response = try await put(url: session.sessionToken, headers: headers, requestBody: data, progressHandler: { progress in
-                progressReport.completedUnitCount = offset + Int64(Float(length) * progress.percent)
-                progressHandler?(progressReport)
-            })
-            lastResponse = response
-            session.uploadedBytes = offset + length
-            
-            if session.isComplete,
-               let json = response.response?.json as? [String: Any],
-               let id = json["id"] as? String {
-                session.remoteFileID = id
+            let beforeBytes = session.uploadedBytes
+            do {
+                session = try await uploadChunk(session: &session, progressHandler: progressHandler)
+                let http = HTTPURLResponse(
+                    url: URL(string: session.sessionToken)!,
+                    statusCode: session.isComplete ? 201 : 202,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                lastResponse = CloudResponse(
+                    response: HTTPResult(data: nil, response: http),
+                    result: .success(HTTPResult(data: nil, response: http))
+                )
+            } catch let error as CloudServiceError {
+                return CloudResponse(response: nil, result: .failure(error))
+            } catch {
+                return CloudResponse(response: nil, result: .failure(error))
+            }
+            if session.uploadedBytes == beforeBytes {
+                break
             }
         }
         return lastResponse ?? CloudResponse(response: HTTPResult(), result: .success(HTTPResult()))

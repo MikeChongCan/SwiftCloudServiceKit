@@ -171,6 +171,9 @@ enum GoogleDriveBackgroundUpload: Sendable {
         if status == 429 {
             return .retryable(afterSeconds: retryAfterSeconds(from: response))
         }
+        if status == 409 {
+            return .retryable(afterSeconds: 2)
+        }
         if (500...599).contains(status) {
             return .retryable(afterSeconds: retryAfterSeconds(from: response))
         }
@@ -274,6 +277,9 @@ enum OneDriveBackgroundUpload: Sendable {
         }
         if status == 429 {
             return .retryable(afterSeconds: retryAfterSeconds(from: response))
+        }
+        if status == 409 {
+            return .retryable(afterSeconds: 2)
         }
         if (500...599).contains(status) {
             return .retryable(afterSeconds: retryAfterSeconds(from: response))
