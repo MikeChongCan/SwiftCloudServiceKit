@@ -12,7 +12,7 @@ Add `CloudServiceKit` to your `Package.swift` dependencies:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.2.2")
+    .package(url: "https://github.com/MikeChongCan/SwiftCloudServiceKit.git", from: "0.2.3")
 ]
 ```
 
