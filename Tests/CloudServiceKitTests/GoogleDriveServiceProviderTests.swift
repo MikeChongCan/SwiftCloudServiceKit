@@ -12,14 +12,10 @@ import XCTest
 final class GoogleDriveServiceProviderTests: XCTestCase {
     
     private var provider: GoogleDriveServiceProvider!
-    private var originalSession: URLSession!
     
     override func setUp() async throws {
         try await super.setUp()
-        originalSession = Just.adaptor.session
-        let configuration = URLSessionConfiguration.default
-        configuration.protocolClasses = [MockURLProtocol.self]
-        Just.adaptor.session = URLSession(configuration: configuration, delegate: Just.adaptor, delegateQueue: nil)
+        URLProtocol.registerClass(MockURLProtocol.self)
         
         let credential = URLCredential(user: "user", password: "token", persistence: .none)
         provider = GoogleDriveServiceProvider(credential: credential)
@@ -27,8 +23,8 @@ final class GoogleDriveServiceProviderTests: XCTestCase {
     
     override func tearDown() async throws {
         provider = nil
-        Just.adaptor.session = originalSession
         MockURLProtocol.requestHandler = nil
+        URLProtocol.unregisterClass(MockURLProtocol.self)
         try await super.tearDown()
     }
     

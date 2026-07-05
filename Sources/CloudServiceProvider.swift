@@ -64,6 +64,8 @@ public protocol CloudServiceProviderDelegate: AnyObject, Sendable {
 @MainActor
 public protocol CloudServiceProvider: AnyObject, CloudServiceResponseProcessing {
 
+    var session: URLSession { get }
+
     var delegate: CloudServiceProviderDelegate? { get set }
     
     /// The name the cloud service.
@@ -295,8 +297,133 @@ extension CloudServiceProvider {
     
 }
 
+// MARK: - Native HTTP Support Types
+
+public protocol URLComponentsConvertible: Sendable {
+    var urlComponents: URLComponents? { get }
+}
+
+extension String: URLComponentsConvertible {
+    public var urlComponents: URLComponents? {
+        return URLComponents(string: self)
+    }
+}
+
+extension URL: URLComponentsConvertible {
+    public var urlComponents: URLComponents? {
+        return URLComponents(url: self, resolvingAgainstBaseURL: false)
+    }
+}
+
+extension URLComponents: URLComponentsConvertible {
+    public var urlComponents: URLComponents? {
+        return self
+    }
+}
+
+public enum HTTPMethod: String, Sendable {
+    case delete = "DELETE"
+    case get = "GET"
+    case head = "HEAD"
+    case options = "OPTIONS"
+    case patch = "PATCH"
+    case post = "POST"
+    case put = "PUT"
+}
+
+public enum HTTPFile: Sendable {
+    case url(URL, String?)
+    case data(String, Data, String?)
+    case text(String, String, String?)
+}
+
+public struct HTTPProgress: Sendable {
+    public enum `Type`: Sendable {
+        case upload
+        case download
+    }
+    public let type: `Type`
+    public let percent: Float
+    public let bytesProcessed: Int64
+    public let bytesExpectedToProcess: Int64
+    
+    public init(type: `Type`, percent: Float, bytesProcessed: Int64 = 0, bytesExpectedToProcess: Int64 = 0) {
+        self.type = type
+        self.percent = percent
+        self.bytesProcessed = bytesProcessed
+        self.bytesExpectedToProcess = bytesExpectedToProcess
+    }
+}
+
+public struct HTTPResult: Sendable {
+    public let content: Data?
+    public let response: HTTPURLResponse?
+    public let error: Error?
+    
+    public init(data: Data? = nil, response: HTTPURLResponse? = nil, error: Error? = nil, task: URLSessionTask? = nil) {
+        self.content = data
+        self.response = response
+        self.error = error
+    }
+    
+    public var data: Data? {
+        return content
+    }
+    
+    public var statusCode: Int? {
+        return response?.statusCode
+    }
+    
+    public var headers: [AnyHashable: Any] {
+        guard let response = response else { return [:] }
+        var lowercasedHeaders: [String: Any] = [:]
+        for (key, value) in response.allHeaderFields {
+            if let stringKey = key as? String {
+                lowercasedHeaders[stringKey.lowercased()] = value
+            } else {
+                lowercasedHeaders["\(key)"] = value
+            }
+        }
+        return lowercasedHeaders
+    }
+    
+    public var json: Any? {
+        guard let data = content else { return nil }
+        return try? JSONSerialization.jsonObject(with: data, options: [])
+    }
+    
+    public var text: String? {
+        guard let data = content else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+}
+
+final class HTTPTaskDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+    let progressHandler: @Sendable (HTTPProgress) -> Void
+    
+    init(progressHandler: @escaping @Sendable (HTTPProgress) -> Void) {
+        self.progressHandler = progressHandler
+    }
+    
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        guard totalBytesExpectedToSend > 0 else { return }
+        let percent = Float(totalBytesSent) / Float(totalBytesExpectedToSend)
+        progressHandler(HTTPProgress(type: .upload, percent: percent, bytesProcessed: totalBytesSent, bytesExpectedToProcess: totalBytesExpectedToSend - totalBytesSent))
+    }
+}
+
 // MARK: - HTTP Requests (Async wrappers)
 extension CloudServiceProvider {
+    
+    public var session: URLSession {
+        return .shared
+    }
     
     public func get(
         url: URLComponentsConvertible,
@@ -375,10 +502,70 @@ extension CloudServiceProvider {
         }
     }
     
-    // Core callback-based request method that interacts with Just
+    private func query(_ params: [String: Any]) -> String {
+        var parts: [String] = []
+        for (key, val) in params {
+            let keyString = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
+            let valString = "\(val)".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "\(val)"
+            parts.append("\(keyString)=\(valString)")
+        }
+        return parts.joined(separator: "&")
+    }
+    
+    private func synthesizeMultipartBody(_ data: [String: Any], files: [String: HTTPFile], boundary: String) -> Data {
+        var body = Data()
+        let boundaryData = "--\(boundary)\r\n".data(using: .utf8)!
+        let endBoundaryData = "--\(boundary)--\r\n".data(using: .utf8)!
+        
+        for (key, val) in data {
+            body.append(boundaryData)
+            body.append("Content-Disposition: form-data; name=\"\(key)\"\r\n\r\n".data(using: .utf8)!)
+            body.append("\(val)\r\n".data(using: .utf8)!)
+        }
+        
+        for (key, file) in files {
+            body.append(boundaryData)
+            var partContent: Data?
+            var partFilename: String?
+            var partMimeType: String?
+            
+            switch file {
+            case let .url(url, mimeType):
+                partFilename = url.lastPathComponent
+                partContent = try? Data(contentsOf: url)
+                partMimeType = mimeType
+            case let .text(filename, text, mimeType):
+                partFilename = filename
+                partContent = text.data(using: .utf8)
+                partMimeType = mimeType
+            case let .data(filename, data, mimeType):
+                partFilename = filename
+                partContent = data
+                partMimeType = mimeType
+            }
+            
+            if let content = partContent, let filename = partFilename {
+                body.append("Content-Disposition: form-data; name=\"\(key)\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
+                if let mime = partMimeType {
+                    body.append("Content-Type: \(mime)\r\n\r\n".data(using: .utf8)!)
+                } else {
+                    body.append("\r\n".data(using: .utf8)!)
+                }
+                body.append(content)
+                body.append("\r\n".data(using: .utf8)!)
+            }
+        }
+        
+        if !data.isEmpty || !files.isEmpty {
+            body.append(endBoundaryData)
+        }
+        return body
+    }
+    
+    // Core callback-based request method that interacts with URLSession
     private func request(
         _ method: HTTPMethod,
-        url: URLComponentsConvertible,
+        url urlConvertible: URLComponentsConvertible,
         params: [String: Any] = [:],
         data: [String: Any] = [:],
         json: Any? = nil,
@@ -388,24 +575,95 @@ extension CloudServiceProvider {
         progressHandler: (@Sendable (HTTPProgress) -> Void)? = nil,
         completion: @escaping CloudCompletionHandler
     ) {
-        var httpheaders = headers
-        httpheaders["Authorization"] = "Bearer \(credential?.password ?? "")"
+        guard let url = urlConvertible.urlComponents?.url else {
+            let res = HTTPResult(error: CloudServiceError.serviceError(-1, "Invalid URL"))
+            completion(CloudResponse(response: res, result: .failure(CloudServiceError.serviceError(-1, "Invalid URL"))))
+            return
+        }
         
-        Just.request(method, url: url, params: params, data: data, json: json,
-                     headers: httpheaders, files: files, requestBody: requestBody, asyncProgressHandler: { progress in
-            progressHandler?(progress)
-        }, asyncCompletionHandler: { response in
-            self.handleResponse(response,
-                                method: method,
-                                url: url,
-                                params: params,
-                                data: data,
-                                json: json,
-                                headers: headers,
-                                requestBody: requestBody,
-                                progressHandler: progressHandler,
-                                completion: completion)
-        })
+        var finalURL = url
+        if !params.isEmpty {
+            var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            let qString = query(params)
+            if !qString.isEmpty {
+                comps?.percentEncodedQuery = qString
+            }
+            if let u = comps?.url {
+                finalURL = u
+            }
+        }
+        
+        var request = URLRequest(url: finalURL)
+        request.httpMethod = method.rawValue
+        
+        var httpheaders = headers
+        if let token = credential?.password {
+            httpheaders["Authorization"] = "Bearer \(token)"
+        }
+        
+        var bodyData: Data?
+        var contentType: String?
+        
+        if let requestData = requestBody {
+            bodyData = requestData
+        } else if !files.isEmpty {
+            let boundary = "CloudServiceKitBoundary-\(UUID().uuidString)"
+            bodyData = synthesizeMultipartBody(data, files: files, boundary: boundary)
+            contentType = "multipart/form-data; boundary=\(boundary)"
+        } else if let requestJSON = json {
+            bodyData = try? JSONSerialization.data(withJSONObject: requestJSON, options: [])
+            contentType = "application/json"
+        } else if !data.isEmpty {
+            if headers["Content-Type"]?.lowercased() == "application/json" || headers["content-type"]?.lowercased() == "application/json" {
+                bodyData = try? JSONSerialization.data(withJSONObject: data, options: [])
+                contentType = "application/json"
+            } else {
+                bodyData = query(data).data(using: .utf8)
+                contentType = "application/x-www-form-urlencoded"
+            }
+        }
+        
+        if let content = contentType {
+            request.setValue(content, forHTTPHeaderField: "Content-Type")
+        }
+        for (key, val) in httpheaders {
+            request.setValue(val, forHTTPHeaderField: key)
+        }
+        request.httpBody = bodyData
+        
+        let taskDelegate = progressHandler.map { HTTPTaskDelegate(progressHandler: $0) }
+        let requestSession = self.session
+        
+        Task {
+            do {
+                let data: Data
+                let response: URLResponse
+                if let bodyData = bodyData, (method == .post || method == .put || method == .patch) {
+                    (data, response) = try await requestSession.upload(for: request, from: bodyData, delegate: taskDelegate)
+                } else {
+                    (data, response) = try await requestSession.data(for: request, delegate: taskDelegate)
+                }
+                
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw CloudServiceError.serviceError(-1, "Invalid HTTP response")
+                }
+                
+                let result = HTTPResult(data: data, response: httpResponse)
+                self.handleResponse(result,
+                                    method: method,
+                                    url: urlConvertible,
+                                    params: params,
+                                    data: data, // Note: passing empty dictionary for data because handleResponse doesn't parse it
+                                    json: json,
+                                    headers: headers,
+                                    requestBody: requestBody,
+                                    progressHandler: progressHandler,
+                                    completion: completion)
+            } catch {
+                let result = HTTPResult(error: error)
+                completion(CloudResponse(response: result, result: .failure(error)))
+            }
+        }
     }
     
     private func handleResponse(
@@ -413,7 +671,7 @@ extension CloudServiceProvider {
         method: HTTPMethod,
         url: URLComponentsConvertible,
         params: [String: Any] = [:],
-        data: [String: Any] = [:],
+        data: Any = [:],
         json: Any? = nil,
         headers: [String: String] = [:],
         requestBody: Data? = nil,
@@ -427,8 +685,7 @@ extension CloudServiceProvider {
                         let newCredential = try await refreshAccessTokenHandler()
                         self.credential = newCredential
                         self.request(method, url: url,
-                                     params: params, data: data,
-                                     json: json, headers: headers,
+                                     params: params, headers: headers,
                                      progressHandler: progressHandler, completion: completion)
                     } catch {
                         completion(CloudResponse(response: response, result: .failure(error)))
@@ -438,13 +695,11 @@ extension CloudServiceProvider {
             } else if let delegate = delegate {
                 Task {
                     do {
-                        // try to renew via delegate (e.g. using refresh token)
                         if let refreshToken = credential?.user {
                             let newCredential = try await delegate.renewAccessToken(withRefreshToken: refreshToken)
                             self.credential = newCredential
                             self.request(method, url: url,
-                                         params: params, data: data,
-                                         json: json, headers: headers,
+                                         params: params, headers: headers,
                                          progressHandler: progressHandler, completion: completion)
                         } else {
                             completion(CloudResponse(response: response, result: .failure(CloudServiceError.unsupported)))
@@ -486,10 +741,4 @@ struct ISO3601DateFormatter: Sendable {
     }
 }
 
-extension HTTPResult: @unchecked Sendable {}
-extension HTTPMethod: @unchecked Sendable {}
-extension HTTPFile: @unchecked Sendable {}
-extension HTTPProgress: @unchecked Sendable {}
-extension HTTPProgress.`Type`: @unchecked Sendable {}
-extension URLCredential: @unchecked Sendable {}
 

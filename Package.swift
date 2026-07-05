@@ -6,9 +6,9 @@ import PackageDescription
 let package = Package(
     name: "CloudServiceKit",
     platforms: [
-        .iOS(.v13),
-        .tvOS(.v14),
-        .macOS(.v10_15)
+        .iOS(.v17),
+        .tvOS(.v17),
+        .macOS(.v14)
     ],
     products: [
         // Products define the executables and libraries a package produces, and make them visible to other packages.

@@ -358,33 +358,46 @@ public class Drive115Connector: CloudServiceConnector {
     }
     
     public func fetchAuthQRCode() async throws -> QRCode {
-        try await withCheckedThrowingContinuation { continuation in
-            let codeVerifier = generateCodeVerifier(count: 32)
-            self.codeVerifier = codeVerifier
-            let codeChallenge = codeChallenge(fromVerifier: codeVerifier)
-            
-            let url = "https://passportapi.115.com/open/authDeviceCode"
-            var data = [String: Any]()
-            data["client_id"] = appId
-            data["code_challenge"] = codeChallenge
-            data["code_challenge_method"] = "sha256"
-            
-            Just.post(url, data: data, headers: headers, asyncCompletionHandler: { result in
-                DispatchQueue.main.async {
-                    if let error = result.error {
-                        continuation.resume(throwing: error)
-                    } else if let object = result.json as? [String: Any],
-                              let dataObject = object["data"] as? [String: Any],
-                              let uid = dataObject["uid"] as? String,
-                              let qrcode = dataObject["qrcode"] as? String,
-                              let time = dataObject["time"] as? Int64,
-                              let sign = dataObject["sign"] as? String {
-                        continuation.resume(returning: QRCode(uid: uid, qrcode: qrcode, sign: sign, time: time))
-                    } else {
-                        continuation.resume(throwing: CloudServiceError.responseDecodeError(result))
-                    }
-                }
-            })
+        let codeVerifier = generateCodeVerifier(count: 32)
+        self.codeVerifier = codeVerifier
+        let codeChallenge = codeChallenge(fromVerifier: codeVerifier)
+        return try await generateDeviceCode(appId: appId, codeChallenge: codeChallenge)
+    }
+    public func generateDeviceCode(appId: String, codeChallenge: String) async throws -> QRCode {
+        let url = URL(string: "https://passportapi.115.com/open/authDeviceCode")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        
+        var data = [String: Any]()
+        data["client_id"] = appId
+        data["code_challenge"] = codeChallenge
+        data["code_challenge_method"] = "sha256"
+        
+        var parts: [String] = []
+        for (key, val) in data {
+            parts.append("\(key)=\(val)")
+        }
+        request.httpBody = parts.joined(separator: "&").data(using: .utf8)
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        for (key, val) in headers {
+            request.setValue(val, forHTTPHeaderField: key)
+        }
+        
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw CloudServiceError.serviceError(-1, "Invalid response")
+        }
+        
+        let result = HTTPResult(data: responseData, response: httpResponse)
+        if let object = result.json as? [String: Any],
+           let dataObject = object["data"] as? [String: Any],
+           let uid = dataObject["uid"] as? String,
+           let qrcode = dataObject["qrcode"] as? String,
+           let time = dataObject["time"] as? Int64,
+           let sign = dataObject["sign"] as? String {
+            return QRCode(uid: uid, qrcode: qrcode, sign: sign, time: time)
+        } else {
+            throw CloudServiceError.responseDecodeError(result)
         }
     }
     
@@ -394,27 +407,31 @@ public class Drive115Connector: CloudServiceConnector {
     }
     
     public func refreshAuthStatus(uid: String, time: Int64, sign: String) async throws -> AuthStatus {
-        try await withCheckedThrowingContinuation { continuation in
-            let url = "https://qrcodeapi.115.com/get/status/"
-            
-            var params = [String: Any]()
-            params["uid"] = uid
-            params["time"] = time
-            params["sign"] = sign
-            
-            Just.get(url, params: params, headers: headers, asyncCompletionHandler:  { result in
-                DispatchQueue.main.async {
-                    if let error = result.error {
-                        continuation.resume(throwing: error)
-                    } else if let object = result.json as? [String: Any],
-                                let dataObject = object["data"] as? [String: Any], let status = dataObject["status"] as? Int {
-                        let msg = dataObject["msg"] as? String
-                        continuation.resume(returning: AuthStatus(status: status, msg: msg))
-                    } else {
-                        continuation.resume(throwing: CloudServiceError.responseDecodeError(result))
-                    }
-                }
-            })
+        var comps = URLComponents(string: "https://qrcodeapi.115.com/get/status/")!
+        comps.queryItems = [
+            URLQueryItem(name: "uid", value: uid),
+            URLQueryItem(name: "time", value: String(time)),
+            URLQueryItem(name: "sign", value: sign)
+        ]
+        var request = URLRequest(url: comps.url!)
+        request.httpMethod = "GET"
+        for (key, val) in headers {
+            request.setValue(val, forHTTPHeaderField: key)
+        }
+        
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw CloudServiceError.serviceError(-1, "Invalid response")
+        }
+        
+        let result = HTTPResult(data: responseData, response: httpResponse)
+        if let object = result.json as? [String: Any],
+           let dataObject = object["data"] as? [String: Any],
+           let status = dataObject["status"] as? Int {
+            let msg = dataObject["msg"] as? String
+            return AuthStatus(status: status, msg: msg)
+        } else {
+            throw CloudServiceError.responseDecodeError(result)
         }
     }
     
@@ -425,50 +442,73 @@ public class Drive115Connector: CloudServiceConnector {
     }
     
     public func getAccessToken(uid: String, codeVerifier: String) async throws -> AccessTokenPayload {
-        try await withCheckedThrowingContinuation { continuation in
-            let url = "https://passportapi.115.com/open/deviceCodeToToken"
-            var data = [String: Any]()
-            data["uid"] = uid
-            data["code_verifier"] = codeVerifier
-            Just.post(url, data: data, headers: headers, asyncCompletionHandler:  { result in
-                DispatchQueue.main.async {
-                    if let error = result.error {
-                        continuation.resume(throwing: error)
-                    } else if let object = result.json as? [String: Any],
-                                let dataObject = object["data"] as? [String: Any],
-                              let accessToken = dataObject["access_token"] as? String,
-                              let refreshToken = dataObject["refresh_token"] as? String,
-                              let expires = dataObject["expires_in"] as? Int {
-                        let payload = AccessTokenPayload(accessToken: accessToken, refreshToken: refreshToken, expiresIn: expires)
-                        continuation.resume(returning: payload)
-                    } else {
-                        continuation.resume(throwing: CloudServiceError.responseDecodeError(result))
-                    }
-                }
-            })
+        let url = URL(string: "https://passportapi.115.com/open/deviceCodeToToken")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        
+        var data = [String: Any]()
+        data["uid"] = uid
+        data["code_verifier"] = codeVerifier
+        
+        var parts: [String] = []
+        for (key, val) in data {
+            parts.append("\(key)=\(val)")
+        }
+        request.httpBody = parts.joined(separator: "&").data(using: .utf8)
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        for (key, val) in headers {
+            request.setValue(val, forHTTPHeaderField: key)
+        }
+        
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw CloudServiceError.serviceError(-1, "Invalid response")
+        }
+        
+        let result = HTTPResult(data: responseData, response: httpResponse)
+        if let object = result.json as? [String: Any],
+           let dataObject = object["data"] as? [String: Any],
+           let accessToken = dataObject["access_token"] as? String,
+           let refreshToken = dataObject["refresh_token"] as? String,
+           let expires = dataObject["expires_in"] as? Int {
+            return AccessTokenPayload(accessToken: accessToken, refreshToken: refreshToken, expiresIn: expires)
+        } else {
+            throw CloudServiceError.responseDecodeError(result)
         }
     }
     
     public func refreshAccessToken(refreshToken: String) async throws -> AccessTokenPayload {
-        try await withCheckedThrowingContinuation { continuation in
-            let url = "https://passportapi.115.com/open/refreshToken"
-            var data = [String: Any]()
-            data["refresh_token"] = refreshToken
-            Just.post(url, data: data, headers: headers, asyncCompletionHandler:  { result in
-                DispatchQueue.main.async {
-                    if let error = result.error {
-                        continuation.resume(throwing: error)
-                    } else if let object = result.json as? [String: Any],
-                                let dataObject = object["data"] as? [String: Any],
-                              let accessToken = dataObject["access_token"] as? String,
-                              let refreshToken = dataObject["refresh_token"] as? String,
-                              let expires = dataObject["expires_in"] as? Int {
-                        continuation.resume(returning: AccessTokenPayload(accessToken: accessToken, refreshToken: refreshToken, expiresIn: expires))
-                    } else {
-                        continuation.resume(throwing: CloudServiceError.responseDecodeError(result))
-                    }
-                }
-            })
+        let url = URL(string: "https://passportapi.115.com/open/refreshToken")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        
+        var data = [String: Any]()
+        data["refresh_token"] = refreshToken
+        
+        var parts: [String] = []
+        for (key, val) in data {
+            parts.append("\(key)=\(val)")
+        }
+        request.httpBody = parts.joined(separator: "&").data(using: .utf8)
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        for (key, val) in headers {
+            request.setValue(val, forHTTPHeaderField: key)
+        }
+        
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw CloudServiceError.serviceError(-1, "Invalid response")
+        }
+        
+        let result = HTTPResult(data: responseData, response: httpResponse)
+        if let object = result.json as? [String: Any],
+           let dataObject = object["data"] as? [String: Any],
+           let accessToken = dataObject["access_token"] as? String,
+           let refreshToken = dataObject["refresh_token"] as? String,
+           let expires = dataObject["expires_in"] as? Int {
+            return AccessTokenPayload(accessToken: accessToken, refreshToken: refreshToken, expiresIn: expires)
+        } else {
+            throw CloudServiceError.responseDecodeError(result)
         }
     }
 }
