@@ -1128,4 +1128,4 @@ extension HTTP: URLSessionTaskDelegate, URLSessionDataDelegate {
   }
 }
 
-nonisolated(unsafe) public let Just = JustOf<HTTP>()
+nonisolated(unsafe) public var Just = JustOf<HTTP>()
