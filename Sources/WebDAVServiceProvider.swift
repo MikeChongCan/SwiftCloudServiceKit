@@ -107,7 +107,18 @@ public class WebDAVServiceProvider: NSObject, CloudServiceProvider, @unchecked S
     // MARK: - CloudServiceProvider Methods
     
     public func getCurrentUserInfo() async throws -> CloudUser {
-        // WebDAV has no standardized current user API, return a generic user based on credentials
+        // No standard current-user API; PROPFIND Depth 0 on the endpoint so a
+        // non-DAV or unauthorized root fails here instead of later at MKCOL.
+        let requestUrl = url(for: rootItem.path)
+        let (_, response) = try await makeRequest(
+            method: "PROPFIND",
+            url: requestUrl,
+            headers: Self.propfindHeaders(depth: "0"),
+            body: Self.propfindAllpropBody
+        )
+        guard response.statusCode == 200 || response.statusCode == 207 else {
+            throw CloudServiceError.serviceError(response.statusCode, "PROPFIND current user probe failed")
+        }
         let username = credential?.user ?? "WebDAV User"
         return CloudUser(username: username, json: [:])
     }
@@ -130,10 +141,7 @@ public class WebDAVServiceProvider: NSObject, CloudServiceProvider, @unchecked S
         </D:propfind>
         """.data(using: .utf8)
         
-        let headers = [
-            "Content-Type": "application/xml; charset=utf-8",
-            "Depth": "1"
-        ]
+        let headers = Self.propfindHeaders(depth: "1")
         
         let (data, response) = try await makeRequest(method: "PROPFIND", url: requestUrl, headers: headers, body: propfindPayload)
         guard response.statusCode == 200 || response.statusCode == 207 else {
@@ -143,28 +151,20 @@ public class WebDAVServiceProvider: NSObject, CloudServiceProvider, @unchecked S
         let parser = WebDAVXMLParser()
         let parsedItems = parser.parse(data: data)
         
-        // Map parsed items to CloudItems, excluding the directory itself
         var items: [CloudItem] = []
-        let parentPath = directory.path.hasSuffix("/") ? directory.path : directory.path + "/"
         
         for item in parsedItems {
-            let urlPath: String
-            if let decodedHref = item.href.removingPercentEncoding {
-                if let url = URL(string: decodedHref) {
-                    urlPath = url.path
-                } else {
-                    urlPath = decodedHref
-                }
-            } else {
-                urlPath = item.href
-            }
+            let urlPath = Self.hrefPath(item.href)
+            let normalizedPath = Self.normalizedDAVPath(urlPath)
             
-            // Normalize path
-            let normalizedPath = urlPath.hasSuffix("/") && urlPath != "/" ? String(urlPath.dropLast()) : urlPath
-            let normalizedParent = parentPath.hasSuffix("/") && parentPath != "/" ? String(parentPath.dropLast()) : parentPath
-            
-            // Skip the listed directory itself
-            if normalizedPath == normalizedParent {
+            // Skip the listed collection. Compare against the request URL path,
+            // not CloudItem.path: rootItem.path is "/" while hrefs carry the
+            // full server path (e.g. /remote.php/dav/files/user/).
+            if Self.shouldSkipListedDirectory(
+                itemPath: normalizedPath,
+                directory: directory,
+                requestURL: requestUrl
+            ) {
                 continue
             }
             
@@ -189,10 +189,7 @@ public class WebDAVServiceProvider: NSObject, CloudServiceProvider, @unchecked S
         </D:propfind>
         """.data(using: .utf8)
         
-        let headers = [
-            "Content-Type": "application/xml; charset=utf-8",
-            "Depth": "0"
-        ]
+        let headers = Self.propfindHeaders(depth: "0")
         
         let (data, response) = try await makeRequest(method: "PROPFIND", url: requestUrl, headers: headers, body: propfindPayload)
         guard response.statusCode == 200 || response.statusCode == 207 else {
@@ -221,11 +218,31 @@ public class WebDAVServiceProvider: NSObject, CloudServiceProvider, @unchecked S
         let (_, response) = try await makeRequest(method: "MKCOL", url: requestUrl)
         let result = HTTPResult(data: nil, response: response, error: nil, task: nil)
         
-        if response.statusCode == 201 || response.statusCode == 405 {
+        if response.statusCode == 201 {
             return CloudResponse(response: result, result: .success(result))
-        } else {
-            return CloudResponse(response: result, result: .failure(CloudServiceError.serviceError(response.statusCode, "MKCOL failed")))
         }
+        // Nextcloud/ownCloud return 405 when the collection already exists.
+        // Synology and non-MKCOL roots also return 405 when the method is
+        // not allowed. Only treat 405 as success after PROPFIND confirms a collection.
+        if response.statusCode == 405 {
+            if try await collectionExists(at: targetPath) {
+                return CloudResponse(response: result, result: .success(result))
+            }
+            return CloudResponse(
+                response: result,
+                result: .failure(CloudServiceError.serviceError(
+                    405,
+                    "MKCOL not allowed at \(targetPath)"
+                ))
+            )
+        }
+        return CloudResponse(
+            response: result,
+            result: .failure(CloudServiceError.serviceError(
+                response.statusCode,
+                "MKCOL failed at \(targetPath)"
+            ))
+        )
     }
     
     public func copyItem(_ item: CloudItem, to directory: CloudItem) async throws -> CloudResponse<HTTPResult, Error> {
@@ -381,6 +398,67 @@ public class WebDAVServiceProvider: NSObject, CloudServiceProvider, @unchecked S
     
     public func isUnauthorizedResponse(_ response: HTTPResult) -> Bool {
         return response.statusCode == 401
+    }
+
+    private static let propfindAllpropBody = """
+        <?xml version="1.0" encoding="utf-8" ?>
+        <D:propfind xmlns:D="DAV:">
+          <D:allprop/>
+        </D:propfind>
+        """.data(using: .utf8)
+
+    private static func propfindHeaders(depth: String) -> [String: String] {
+        [
+            "Content-Type": "application/xml; charset=utf-8",
+            "Depth": depth
+        ]
+    }
+
+    private static func hrefPath(_ href: String) -> String {
+        if let decodedHref = href.removingPercentEncoding {
+            if let url = URL(string: decodedHref) {
+                return url.path
+            }
+            return decodedHref
+        }
+        return href
+    }
+
+    private static func normalizedDAVPath(_ path: String) -> String {
+        guard path != "/" else { return "/" }
+        return path.hasSuffix("/") ? String(path.dropLast()) : path
+    }
+
+    private static func shouldSkipListedDirectory(
+        itemPath: String,
+        directory: CloudItem,
+        requestURL: URL
+    ) -> Bool {
+        if itemPath == normalizedDAVPath(requestURL.path) {
+            return true
+        }
+        if directory.path != "/" {
+            return itemPath == normalizedDAVPath(directory.path)
+        }
+        return false
+    }
+
+    private func collectionExists(at path: String) async throws -> Bool {
+        let item = CloudItem(
+            id: path,
+            name: (path as NSString).lastPathComponent,
+            path: path,
+            isDirectory: true
+        )
+        do {
+            let attributes = try await attributesOfItem(item)
+            return attributes.isDirectory
+        } catch {
+            if case CloudServiceError.serviceError(404, _) = error {
+                return false
+            }
+            throw error
+        }
     }
 }
 

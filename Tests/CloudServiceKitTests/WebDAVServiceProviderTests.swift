@@ -33,8 +33,53 @@ final class WebDAVServiceProviderTests: XCTestCase {
     }
     
     func testGetCurrentUserInfo() async throws {
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.httpMethod, "PROPFIND")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Depth"), "0")
+            let xml = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <D:multistatus xmlns:D="DAV:">
+                <D:response>
+                    <D:href>/dav/</D:href>
+                    <D:propstat>
+                        <D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+                        <D:status>HTTP/1.1 200 OK</D:status>
+                    </D:propstat>
+                </D:response>
+            </D:multistatus>
+            """
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 207,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/xml"]
+            )!
+            return (response, xml.data(using: .utf8))
+        }
+
         let user = try await provider.getCurrentUserInfo()
         XCTAssertEqual(user.username, "user")
+    }
+
+    func testGetCurrentUserInfo_throwsWhenPropfindFails() async {
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 401,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, nil)
+        }
+
+        do {
+            _ = try await provider.getCurrentUserInfo()
+            XCTFail("Expected PROPFIND failure")
+        } catch let CloudServiceError.serviceError(code, _) {
+            XCTAssertEqual(code, 401)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
     
     func testGetCloudSpaceInformation() async throws {
@@ -117,6 +162,118 @@ final class WebDAVServiceProviderTests: XCTestCase {
         case .failure(let error):
             XCTFail("Expected success but got error: \(error)")
         }
+    }
+
+    func testCreateFolder_405IsSuccessWhenCollectionExists() async throws {
+        MockURLProtocol.requestHandler = { request in
+            if request.httpMethod == "MKCOL" {
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 405,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                return (response, nil)
+            }
+            XCTAssertEqual(request.httpMethod, "PROPFIND")
+            let xml = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <D:multistatus xmlns:D="DAV:">
+                <D:response>
+                    <D:href>/dav/folder1/existing/</D:href>
+                    <D:propstat>
+                        <D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+                        <D:status>HTTP/1.1 200 OK</D:status>
+                    </D:propstat>
+                </D:response>
+            </D:multistatus>
+            """
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 207,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/xml"]
+            )!
+            return (response, xml.data(using: .utf8))
+        }
+
+        let parent = CloudItem(id: "/dav/folder1", name: "folder1", path: "/dav/folder1", isDirectory: true)
+        let response = try await provider.createFolder("existing", at: parent)
+        if case .failure(let error) = response.result {
+            XCTFail("Expected success but got error: \(error)")
+        }
+    }
+
+    func testCreateFolder_405IsFailureWhenCollectionMissing() async throws {
+        MockURLProtocol.requestHandler = { request in
+            if request.httpMethod == "MKCOL" {
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 405,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                return (response, nil)
+            }
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 404,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, nil)
+        }
+
+        let parent = CloudItem(id: "/", name: "Root", path: "/", isDirectory: true)
+        let response = try await provider.createFolder("qcam_library", at: parent)
+        switch response.result {
+        case .success:
+            XCTFail("405 without an existing collection must fail")
+        case .failure(let error):
+            guard case CloudServiceError.serviceError(let code, let message) = error else {
+                XCTFail("Expected serviceError, got \(error)")
+                return
+            }
+            XCTAssertEqual(code, 405)
+            XCTAssertTrue(message?.contains("qcam_library") == true)
+        }
+    }
+
+    func testContentsOfDirectory_skipsSelfWhenRootPathIsSlash() async throws {
+        let xmlResponse = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <D:multistatus xmlns:D="DAV:">
+            <D:response>
+                <D:href>/dav/</D:href>
+                <D:propstat>
+                    <D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+                    <D:status>HTTP/1.1 200 OK</D:status>
+                </D:propstat>
+            </D:response>
+            <D:response>
+                <D:href>/dav/clip.mov</D:href>
+                <D:propstat>
+                    <D:prop>
+                        <D:resourcetype/>
+                        <D:getcontentlength>12</D:getcontentlength>
+                    </D:prop>
+                    <D:status>HTTP/1.1 200 OK</D:status>
+                </D:propstat>
+            </D:response>
+        </D:multistatus>
+        """
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 207,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/xml"]
+            )!
+            return (response, xmlResponse.data(using: .utf8))
+        }
+
+        let items = try await provider.contentsOfDirectory(provider.rootItem)
+        XCTAssertEqual(items.map(\.name), ["clip.mov"])
     }
     
     func testRemoveItem() async throws {
