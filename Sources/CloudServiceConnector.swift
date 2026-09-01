@@ -32,7 +32,7 @@ public struct CloudOAuthTokenResult: Sendable {
 }
 
 @MainActor
-public class CloudServiceConnector: CloudServiceOAuth, CloudServiceProviderDelegate, @unchecked Sendable {
+open class CloudServiceConnector: CloudServiceOAuth, CloudServiceProviderDelegate, @unchecked Sendable {
     
     /// subclass must provide authorizeUrl
     public var authorizeUrl: String { return "" }
@@ -44,6 +44,10 @@ public class CloudServiceConnector: CloudServiceOAuth, CloudServiceProviderDeleg
     public var authorizeParameters: [String: String] { return [:] }
     
     public var tokenParameters: [String: String] { return [:] }
+
+    /// Send an RFC 7636 PKCE challenge with the authorization request.
+    /// Required by Microsoft Entra for public clients, which authenticate with no client secret.
+    open var usesPKCE: Bool { false }
     
     public var appId: String
     
@@ -98,20 +102,12 @@ public class CloudServiceConnector: CloudServiceOAuth, CloudServiceProviderDeleg
     
     public func connect(viewController: UIViewController,
                         completion: @escaping (Result<OAuthSwift.TokenSuccess, Error>) -> Void) {
-        let oauth = OAuth2Swift(consumerKey: appId, consumerSecret: appSecret, authorizeUrl: authorizeUrl, accessTokenUrl: accessTokenUrl, responseType: responseType, contentType: nil)
-        oauth.allowMissingStateCheck = true
+        let oauth = makeOAuth2Swift()
         #if os(iOS)
         oauth.authorizeURLHandler = customURLHandler ?? SafariURLHandler(viewController: viewController, oauthSwift: oauth)
         #endif
         self.oauth = oauth
-        _ = oauth.authorize(withCallbackURL: URL(string: callbackUrl), scope: scope, state: state, parameters: authorizeParameters, completionHandler: { result in
-            switch result {
-            case .success(let token):
-                completion(.success(token))
-            case .failure(let error):
-                completion(.failure(error))
-            }
-        })
+        startAuthorization(oauth: oauth, completion: completion)
     }
     
     public func connectWithASWebAuthenticationSession(viewController: UIViewController, prefersEphemeralWebBrowserSession: Bool = false) async throws -> CloudOAuthTokenResult {
@@ -136,8 +132,7 @@ public class CloudServiceConnector: CloudServiceOAuth, CloudServiceProviderDeleg
     public func connectWithASWebAuthenticationSession(viewController: UIViewController,
                                                       prefersEphemeralWebBrowserSession: Bool = false,
                                                       completion: @escaping (Result<OAuthSwift.TokenSuccess, Error>) -> Void) {
-        let oauth = OAuth2Swift(consumerKey: appId, consumerSecret: appSecret, authorizeUrl: authorizeUrl, accessTokenUrl: accessTokenUrl, responseType: responseType, contentType: nil)
-        oauth.allowMissingStateCheck = true
+        let oauth = makeOAuth2Swift()
         #if os(iOS)
         var callbackUrlScheme = callbackUrl
         if let range = callbackUrl.range(of: ":/") {
@@ -148,14 +143,7 @@ public class CloudServiceConnector: CloudServiceOAuth, CloudServiceProviderDeleg
                                                                               prefersEphemeralWebBrowserSession: prefersEphemeralWebBrowserSession)
         #endif
         self.oauth = oauth
-        _ = oauth.authorize(withCallbackURL: URL(string: callbackUrl), scope: scope, state: state, parameters: authorizeParameters, completionHandler: { result in
-            switch result {
-            case .success(let token):
-                completion(.success(token))
-            case .failure(let error):
-                completion(.failure(error))
-            }
-        })
+        startAuthorization(oauth: oauth, completion: completion)
     }
     
     public func renewToken(with refreshToken: String) async throws -> CloudOAuthTokenResult {
@@ -177,8 +165,7 @@ public class CloudServiceConnector: CloudServiceOAuth, CloudServiceProviderDeleg
     }
     
     public func renewToken(with refreshToken: String, completion: @escaping (Result<OAuthSwift.TokenSuccess, Error>) -> Void) {
-        let oauth = OAuth2Swift(consumerKey: appId, consumerSecret: appSecret, authorizeUrl: authorizeUrl, accessTokenUrl: accessTokenUrl, responseType: responseType, contentType: nil)
-        oauth.allowMissingStateCheck = true
+        let oauth = makeOAuth2Swift()
         oauth.renewAccessToken(withRefreshToken: refreshToken, parameters: tokenParameters) { result in
             switch result {
             case .success(let token):
@@ -188,6 +175,55 @@ public class CloudServiceConnector: CloudServiceOAuth, CloudServiceProviderDeleg
             }
         }
         self.oauth = oauth
+    }
+
+    func makeOAuth2Swift() -> OAuth2Swift {
+        let oauth = OAuth2Swift(consumerKey: appId, consumerSecret: appSecret, authorizeUrl: authorizeUrl, accessTokenUrl: accessTokenUrl, responseType: responseType, contentType: nil)
+        oauth.allowMissingStateCheck = true
+        return oauth
+    }
+
+    func startAuthorization(
+        oauth: OAuth2Swift,
+        completion: @escaping (Result<OAuthSwift.TokenSuccess, Error>) -> Void
+    ) {
+        let handler: OAuthSwift.TokenCompletionHandler = { result in
+            switch result {
+            case .success(let token):
+                completion(.success(token))
+            case .failure(let error):
+                completion(.failure(error))
+            }
+        }
+        guard let callbackURL = URL(string: callbackUrl) else {
+            completion(.failure(CloudServiceError.serviceError(-1, "Invalid callback URL")))
+            return
+        }
+        if usesPKCE {
+            guard let verifier = generateCodeVerifier(),
+                  let challenge = generateCodeChallenge(codeVerifier: verifier) else {
+                completion(.failure(CloudServiceError.serviceError(-1, "Failed to generate PKCE challenge")))
+                return
+            }
+            _ = oauth.authorize(
+                withCallbackURL: callbackURL,
+                scope: scope,
+                state: state,
+                codeChallenge: challenge,
+                codeChallengeMethod: "S256",
+                codeVerifier: verifier,
+                parameters: authorizeParameters,
+                completionHandler: handler
+            )
+        } else {
+            _ = oauth.authorize(
+                withCallbackURL: callbackURL,
+                scope: scope,
+                state: state,
+                parameters: authorizeParameters,
+                completionHandler: handler
+            )
+        }
     }
 }
 
@@ -294,6 +330,8 @@ public class GoogleDriveConnector: CloudServiceConnector, @unchecked Sendable {
 
 // MARK: - OneDriveConnector
 public class OneDriveConnector: CloudServiceConnector, @unchecked Sendable {
+
+    public override var usesPKCE: Bool { true }
 
     public override var authorizeUrl: String {
         return "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
