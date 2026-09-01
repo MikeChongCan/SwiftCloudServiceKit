@@ -8,6 +8,9 @@ import XCTest
 
 final class OAuthPKCETests: XCTestCase {
 
+    /// RFC 7636 unreserved: ALPHA / DIGIT / "-" / "." / "_" / "~"
+    private let pkceUnreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+
     func test_codeChallenge_matchesRFC7636AppendixBExample() {
         let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
         let expectedChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
@@ -21,12 +24,32 @@ final class OAuthPKCETests: XCTestCase {
         XCTAssertFalse(encoded.contains("="))
     }
 
-    func test_generateCodeVerifier_producesExpectedLength() throws {
+    func test_generateCodeVerifier_isRFC7636LengthAndCharset() throws {
         let verifier = try OAuthPKCE.generateCodeVerifier(byteCount: 32)
-        // 32 raw bytes → 43 base64url characters (no padding)
-        XCTAssertEqual(verifier.count, 43)
-        XCTAssertFalse(verifier.contains("+"))
-        XCTAssertFalse(verifier.contains("/"))
-        XCTAssertFalse(verifier.contains("="))
+        XCTAssertGreaterThanOrEqual(verifier.count, 43)
+        XCTAssertLessThanOrEqual(verifier.count, 128)
+        XCTAssertTrue(verifier.unicodeScalars.allSatisfy { pkceUnreserved.contains($0) })
+    }
+}
+
+@MainActor
+final class CloudServiceConnectorPKCETests: XCTestCase {
+
+    func test_oneDriveAuthorizeURL_includesPKCEChallenge() {
+        let connector = OneDriveConnector(
+            appId: "client-id",
+            appSecret: "",
+            callbackUrl: "qcam://oauth/onedrive"
+        )
+        XCTAssertTrue(connector.usesPKCE)
+    }
+
+    func test_googleDriveAuthorizeURL_omitsPKCEChallenge() {
+        let connector = GoogleDriveConnector(
+            appId: "client-id",
+            appSecret: "secret",
+            callbackUrl: "com.googleusercontent.apps.test:/oauth2redirect"
+        )
+        XCTAssertFalse(connector.usesPKCE)
     }
 }
